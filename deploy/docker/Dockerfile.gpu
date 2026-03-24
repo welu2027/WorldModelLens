@@ -1,0 +1,64 @@
+# World Model Lens - GPU Image
+# Optimized for training and GPU-accelerated analysis
+
+FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+
+LABEL maintainer="World Model Lens Team <team@worldmodellens.ai>"
+LABEL description="World Model Lens - Interpretability toolkit for world models (GPU)"
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV WML_VERSION=0.2.0
+ENV CUDA_VISIBLE_DEVICES=0
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    curl \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    python3.11 \
+    python3.11-dev \
+    python3-pip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN useradd -m -u 1000 -s /bin/bash wml
+
+# Install Python dependencies
+COPY pyproject.toml poetry.lock* ./
+RUN pip install --no-cache-dir poetry && \
+    poetry config virtualenvs.create false && \
+    poetry install --no-interaction --no-ansi --no-root \
+        --extras "api monitoring" \
+        --extras "dev" \
+        --extras "gpu"
+
+# Copy application
+COPY world_model_lens/ ./world_model_lens/
+COPY tests/ ./tests/
+COPY examples/ ./examples/
+COPY docs/ ./docs/
+
+# Set working directory
+WORKDIR /app
+
+# Switch to non-root user
+USER wml
+
+# Default command
+CMD ["python", "-m", "world_model_lens.cli.commands", "--help"]
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import world_model_lens; print('ok')" || exit 1
+
+# Expose ports
+EXPOSE 8000 9090 5555
+
+# Labels
+LABEL org.opencontainers.image.source="https://github.com/worldmodellens/world_model_lens"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL com.nvidia.volumes.needed="nvidia_driver"

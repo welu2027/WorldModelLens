@@ -1,0 +1,29 @@
+# Circuit Discovery Experiment
+# Run: wml run circuit_discovery.yaml
+
+experiment_name: circuit_discovery
+description: Discover causal circuits via ACDC
+
+steps:
+  - name: collect_trajectories
+    type: collect
+    n_episodes: 20
+    output: trajectories/
+
+  - name: create_corrupted
+    type: corrupt
+    corruption_type: shuffle_actions
+    fraction: 0.3
+    output: trajectories/corrupted/
+
+  - name: circuit_discovery
+    type: circuit_discovery
+    method: acdc
+    threshold: 0.1
+    max_steps: 500
+    output: results/circuit.json
+
+  - name: visualize_circuit
+    type: visualize_circuit
+    layout: hierarchical
+    output: results/circuit.html

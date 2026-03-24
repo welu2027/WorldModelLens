@@ -1,0 +1,45 @@
+apiVersion: v2
+name: world-model-lens
+description: Production-ready interpretability toolkit for world models
+type: application
+version: 0.2.0
+appVersion: "0.2.0"
+keywords:
+  - world-models
+  - interpretability
+  - reinforcement-learning
+  - dreamer
+  - rl
+  - machine-learning
+maintainers:
+  - name: World Model Lens Team
+    email: team@worldmodellens.ai
+sources:
+  - https://github.com/worldmodellens/world_model_lens
+home: https://worldmodellens.ai
+icons:
+  - url: https://worldmodellens.ai/logo.png
+    type: image/png
+annotations:
+  category: Machine Learning
+  licenses: MIT
+dependencies:
+  - name: common
+    version: "2.x.x"
+    repository: https://charts.bitnami.com/bitnami
+  - name: redis
+    version: "18.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled
+  - name: postgresql
+    version: "14.x.x"
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled
+  - name: prometheus
+    version: "25.x.x"
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: prometheus.enabled
+  - name: grafana
+    version: "9.x.x"
+    repository: https://grafana.github.io/helm-charts
+    condition: grafana.enabled

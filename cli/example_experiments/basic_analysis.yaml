@@ -1,0 +1,27 @@
+# Basic Analysis Experiment
+# Run: wml run basic_analysis.yaml
+
+experiment_name: basic_analysis
+description: Basic trajectory collection and probing
+
+steps:
+  - name: collect_trajectories
+    type: collect
+    n_episodes: 10
+    max_steps: 1000
+    output: trajectories/episode_{episode_id}.pt
+
+  - name: probe
+    type: probe
+    activations:
+      - z_posterior
+      - h
+    concepts:
+      - reward_region
+      - novelty
+    output: results/probe_results.json
+
+  - name: report
+    type: report
+    format: html
+    output: results/report.html

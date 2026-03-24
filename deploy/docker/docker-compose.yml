@@ -1,0 +1,157 @@
+version: '3.8'
+
+services:
+  # World Model Lens API Server
+  api:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.cpu
+    container_name: wml-api
+    ports:
+      - "8000:8000"
+    environment:
+      - WML_ENV=development
+      - WML_LOG_LEVEL=INFO
+      - WML_REDIS_URL=redis://redis:6379
+      - WML_DB_URL=postgresql://wml:wml@postgres:5432/wml
+      - WML_STORAGE_URL=s3://wml-storage
+      - WML_SECURITY_JWT_SECRET=${JWT_SECRET:-changeme}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel:4317
+      - OTEL_SERVICE_NAME=wml-api
+    depends_on:
+      - redis
+      - postgres
+      - otel
+    restart: unless-stopped
+    networks:
+      - wml-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis for caching and session storage
+  redis:
+    image: redis:7-alpine
+    container_name: wml-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 2gb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    networks:
+      - wml-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # PostgreSQL for metadata and results
+  postgres:
+    image: postgres:15-alpine
+    container_name: wml-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_DB=wml
+      - POSTGRES_USER=wml
+      - POSTGRES_PASSWORD=wml
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    networks:
+      - wml-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wml"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Prometheus for metrics
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: wml-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+    networks:
+      - wml-network
+
+  # Grafana for dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: wml-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - wml-network
+
+  # OpenTelemetry Collector
+  otel:
+    image: otel/opentelemetry-collector:latest
+    container_name: wml-otel
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8888:8888"   # Prometheus metrics exposed by the collector
+      - "8889:8889"   # Prometheus exporter metrics
+    restart: unless-stopped
+    networks:
+      - wml-network
+
+  # MinIO for local S3-compatible storage
+  minio:
+    image: minio/minio:latest
+    container_name: wml-minio
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=wml
+      - MINIO_ROOT_PASSWORD=wmlsecret
+    volumes:
+      - minio-data:/data
+    command: server /data --console-address ":9001"
+    restart: unless-stopped
+    networks:
+      - wml-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+volumes:
+  redis-data:
+  postgres-data:
+  prometheus-data:
+  grafana-data:
+  minio-data:
+
+networks:
+  wml-network:
+    driver: bridge
