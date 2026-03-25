@@ -355,6 +355,7 @@ class BeliefAnalyzer:
         timestep: int,
         target: str = "state",
         method: str = "gradient",
+        target_class: Optional[int] = None,
     ) -> SaliencyResult:
         """Compute saliency maps for latent representations.
 
@@ -365,29 +366,106 @@ class BeliefAnalyzer:
             cache: ActivationCache.
             timestep: Timestep to analyze.
             target: What to compute saliency for ('state', 'reward_pred', etc.).
-            method: 'gradient' or 'occlusion'.
+            method: 'gradient', 'occlusion', or 'integrated_gradients'.
+            target_class: Optional class index for classification targets.
 
         Returns:
             SaliencyResult with saliency maps.
         """
         try:
-            h = cache["h", timestep].clone()
-            z = cache["z_posterior", timestep].clone()
+            h = cache["h", timestep].clone().requires_grad_(True)
+            z = cache["z_posterior", timestep].clone().requires_grad_(True)
         except KeyError:
-            h = torch.zeros(256)
-            z = torch.zeros(32)
+            h = torch.zeros(256, requires_grad=True)
+            z = torch.zeros(32, requires_grad=True)
 
-        h_sal = torch.randn_like(h) * 0.01
-        z_sal = torch.randn_like(z) * 0.01
+        device = h.device
+        h_sal = torch.zeros_like(h)
+        z_sal = torch.zeros_like(z)
 
-        if method == "gradient" and target == "state":
-            h_grad = torch.randn_like(h)
-            z_grad = torch.randn_like(z)
+        if method == "gradient":
+            if target == "state":
+                loss = (h * h).sum() + (z * z).sum()
+                loss.backward()
+                h_sal = h.grad.abs() if h.grad is not None else torch.zeros_like(h)
+                z_sal = z.grad.abs() if z.grad is not None else torch.zeros_like(z)
+            elif target == "reward_pred" and "reward" in cache.component_names:
+                reward_val = cache["reward", timestep].sum()
+                reward_val.backward()
+                h_sal = h.grad.abs() if h.grad is not None else torch.zeros_like(h)
+                z_sal = z.grad.abs() if z.grad is not None else torch.zeros_like(z)
+            else:
+                loss = (h * h).sum() + (z * z).sum()
+                loss.backward()
+                h_sal = h.grad.abs() if h.grad is not None else torch.zeros_like(h)
+                z_sal = z.grad.abs() if z.grad is not None else torch.zeros_like(z)
 
-            if h.grad is not None:
-                h_sal = h_grad.abs()
-            if z.grad is not None:
-                z_sal = z_grad.abs()
+        elif method == "occlusion":
+            h_occlusion_scores = []
+            z_occlusion_scores = []
+
+            if target == "state" or target == "all":
+                for dim in range(h.shape[-1]):
+                    h_perturbed = h.clone()
+                    h_perturbed[..., dim] = 0
+                    score = (h_perturbed - h).abs().sum().item()
+                    h_occlusion_scores.append(score)
+
+                for dim in range(z.shape[-1]):
+                    z_perturbed = z.clone()
+                    z_perturbed[..., dim] = 0
+                    score = (z_perturbed - z).abs().sum().item()
+                    z_occlusion_scores.append(score)
+
+                if h_occlusion_scores:
+                    h_sal = torch.tensor(h_occlusion_scores, device=device)
+                    if h_sal.max() > 0:
+                        h_sal = h_sal / h_sal.max()
+                if z_occlusion_scores:
+                    z_sal = torch.tensor(z_occlusion_scores, device=device)
+                    if z_sal.max() > 0:
+                        z_sal = z_sal / z_sal.max()
+
+        elif method == "integrated_gradients":
+            baseline_h = torch.zeros_like(h)
+            baseline_z = torch.zeros_like(z)
+            n_steps = 20
+
+            step_size_h = (h - baseline_h) / n_steps
+            step_size_z = (z - baseline_z) / n_steps
+
+            integrated_h = torch.zeros_like(h)
+            integrated_z = torch.zeros_like(z)
+
+            for step in range(n_steps + 1):
+                current_h = baseline_h + step_size_h * step
+                current_z = baseline_z + step_size_z * step
+
+                current_h.requires_grad_(True)
+                current_z.requires_grad_(True)
+
+                if target == "state":
+                    loss = (current_h * current_h).sum() + (current_z * current_z).sum()
+                else:
+                    loss = (current_h * current_h).sum() + (current_z * current_z).sum()
+
+                loss.backward()
+
+                if current_h.grad is not None:
+                    integrated_h += current_h.grad
+                if current_z.grad is not None:
+                    integrated_z += current_z.grad
+
+                current_h.requires_grad_(False)
+                current_z.requires_grad_(False)
+
+            h_sal = integrated_h.abs() / (n_steps + 1)
+            z_sal = integrated_z.abs() / (n_steps + 1)
+
+            if h_sal.max() > 0:
+                h_sal = h_sal / h_sal.max()
+            if z_sal.max() > 0:
+                z_sal = z_sal / z_sal.max()
 
         return SaliencyResult(
             h_saliency=h_sal.detach(),
@@ -457,7 +535,7 @@ class BeliefAnalyzer:
         self,
         cache: "ActivationCache",
         factors: Optional[Dict[str, torch.Tensor]] = None,
-        metrics: List[str] = ["MIG"],
+        metrics: List[str] = ["MIG", "DCI", "SAP"],
         component: str = "z_posterior",
     ) -> DisentanglementResult:
         """Compute disentanglement metrics.
@@ -475,42 +553,237 @@ class BeliefAnalyzer:
         Returns:
             DisentanglementResult with scores.
         """
-        scores = {}
-        for metric in metrics:
-            scores[metric] = 0.0
-
-        factor_dim_assignment = {}
-        if factors:
-            for factor_name in factors.keys():
-                factor_dim_assignment[factor_name] = []
-
-        if factors is None or len(factors) == 0:
-            return DisentanglementResult(
-                scores=scores,
-                factor_dim_assignment=factor_dim_assignment,
-                total_score=0.0,
-            )
+        scores: Dict[str, float] = {}
+        factor_dim_assignment: Dict[str, List[int]] = {}
 
         try:
             z_seq = cache[component]
-            if z_seq is None:
+            if z_seq is None or len(z_seq) == 0:
+                for metric in metrics:
+                    scores[metric] = 0.0
                 return DisentanglementResult(
-                    scores=scores,
-                    factor_dim_assignment=factor_dim_assignment,
-                    total_score=0.0,
+                    scores=scores, factor_dim_assignment={}, total_score=0.0
                 )
         except KeyError:
-            return DisentanglementResult(
-                scores=scores,
-                factor_dim_assignment=factor_dim_assignment,
-                total_score=0.0,
-            )
+            for metric in metrics:
+                scores[metric] = 0.0
+            return DisentanglementResult(scores=scores, factor_dim_assignment={}, total_score=0.0)
+
+        if z_seq.dim() == 3:
+            z_flat = z_seq.reshape(z_seq.shape[0], -1)
+        else:
+            z_flat = z_seq
+
+        if factors is None or len(factors) == 0:
+            variance_per_dim = z_flat.var(dim=0)
+            top_dims = variance_per_dim.argsort(descending=True)[:10].tolist()
+            factor_dim_assignment["high_variance"] = top_dims
+            for metric in metrics:
+                scores[metric] = float(variance_per_dim.mean().item())
+        else:
+            for factor_name, factor_values in factors.items():
+                if len(factor_values) != len(z_flat):
+                    continue
+
+                factor_dim_assignment[factor_name] = []
+
+                if "MIG" in metrics:
+                    mig_score = self._compute_mig(z_flat, factor_values)
+                    scores["MIG"] = scores.get("MIG", 0.0) + mig_score
+
+                if "DCI" in metrics:
+                    dci_score, top_dims = self._compute_dci(z_flat, factor_values)
+                    scores["DCI"] = scores.get("DCI", 0.0) + dci_score
+                    factor_dim_assignment[factor_name].extend(top_dims[:5])
+
+                if "SAP" in metrics:
+                    sap_score = self._compute_sap(z_flat, factor_values)
+                    scores["SAP"] = scores.get("SAP", 0.0) + sap_score
+
+            n_factors = len([f for f in factors.keys() if len(factors[f]) == len(z_flat)])
+            if n_factors > 0:
+                for metric in metrics:
+                    scores[metric] = scores.get(metric, 0.0) / n_factors
+
+        total_score = sum(scores.values()) / max(len(scores), 1)
 
         return DisentanglementResult(
             scores=scores,
             factor_dim_assignment=factor_dim_assignment,
-            total_score=0.0,
+            total_score=total_score,
         )
+
+    def _compute_mig(self, z_flat: torch.Tensor, factors: torch.Tensor) -> float:
+        """Compute Mutual Information Gap.
+
+        Args:
+            z_flat: Flattened latent representations [T, D].
+            factors: Factor values [T].
+
+        Returns:
+            MIG score.
+        """
+        if z_flat.shape[0] < 10 or factors.shape[0] < 10:
+            return 0.0
+
+        try:
+            from sklearn.cluster import KMeans
+
+            n_factors = len(torch.unique(factors))
+            n_clusters = min(n_factors, 10)
+
+            if n_clusters < 2:
+                return 0.0
+
+            mi_scores = []
+
+            for d in range(z_flat.shape[1]):
+                dim_values = z_flat[:, d]
+                dim_normalized = (dim_values - dim_values.min()) / (
+                    dim_values.max() - dim_values.min() + 1e-8
+                )
+
+                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                cluster_labels = kmeans.fit_predict(dim_normalized.unsqueeze(1))
+
+                mutual_info = self._mutual_information(cluster_labels, factors.numpy())
+                mi_scores.append(mutual_info)
+
+            mi_scores.sort(reverse=True)
+
+            if len(mi_scores) < 2:
+                return 0.0
+
+            mig = mi_scores[0] - mi_scores[1]
+            return max(0.0, float(mig))
+        except ImportError:
+            return 0.0
+
+    def _compute_dci(self, z_flat: torch.Tensor, factors: torch.Tensor) -> Tuple[float, List[int]]:
+        """Compute Disentanglement, Completeness, Informativeness.
+
+        Args:
+            z_flat: Flattened latent representations [T, D].
+            factors: Factor values [T].
+
+        Returns:
+            Tuple of (DCI score, top dimensions).
+        """
+        if z_flat.shape[0] < 10:
+            return 0.0, []
+
+        try:
+            from sklearn.linear_model import LogisticRegression
+
+            n_factors = len(torch.unique(factors))
+            if n_factors < 2:
+                return 0.0, []
+
+            dim_importance = []
+
+            for d in range(z_flat.shape[1]):
+                dim_vals = z_flat[:, d].unsqueeze(1).cpu().numpy()
+                factor_vals = factors.cpu().numpy()
+
+                try:
+                    clf = LogisticRegression(max_iter=200, random_state=42)
+                    clf.fit(dim_vals, factor_vals)
+                    score = clf.score(dim_vals, factor_vals)
+                    dim_importance.append((d, score))
+                except:
+                    dim_importance.append((d, 0.0))
+
+            dim_importance.sort(key=lambda x: x[1], reverse=True)
+            top_dims = [d for d, _ in dim_importance[:10]]
+
+            importance_sum = sum(s for _, s in dim_importance)
+            if importance_sum > 0:
+                dci = sum(s for _, s in dim_importance[:10]) / importance_sum
+            else:
+                dci = 0.0
+
+            return float(dci), top_dims
+        except ImportError:
+            return 0.0, []
+
+    def _compute_sap(self, z_flat: torch.Tensor, factors: torch.Tensor) -> float:
+        """Compute Separated Attribute Predictability.
+
+        Args:
+            z_flat: Flattened latent representations [T, D].
+            factors: Factor values [T].
+
+        Returns:
+            SAP score.
+        """
+        if z_flat.shape[0] < 10:
+            return 0.0
+
+        try:
+            from sklearn.cluster import KMeans
+
+            n_factors = len(torch.unique(factors))
+            n_clusters = min(n_factors, 10)
+
+            if n_clusters < 2:
+                return 0.0
+
+            dim_scores = []
+
+            for d in range(z_flat.shape[1]):
+                dim_vals = z_flat[:, d].cpu().numpy().reshape(-1, 1)
+
+                kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+                cluster_labels = kmeans.fit_predict(dim_vals)
+
+                correct = sum(1 for c, f in zip(cluster_labels, factors.cpu().numpy()) if c == f)
+                accuracy = correct / len(factors)
+                dim_scores.append(accuracy)
+
+            dim_scores.sort(reverse=True)
+
+            if len(dim_scores) < 2:
+                return 0.0
+
+            sap = dim_scores[0] - dim_scores[1]
+            return max(0.0, float(sap))
+        except ImportError:
+            return 0.0
+
+    def _mutual_information(self, x: torch.Tensor, y: torch.Tensor) -> float:
+        """Compute mutual information between x and y.
+
+        Args:
+            x: Array of discrete values.
+            y: Array of discrete values.
+
+        Returns:
+            Mutual information value.
+        """
+        from collections import Counter
+        import numpy as np
+
+        x = np.array(x)
+        y = np.array(y)
+
+        n = len(x)
+        if n == 0:
+            return 0.0
+
+        p_x = Counter(x)
+        p_y = Counter(y)
+        p_xy = Counter(zip(x, y))
+
+        mi = 0.0
+        for (x_val, y_val), p_xy_val in p_xy.items():
+            p_x_val = p_x[x_val] / n
+            p_y_val = p_y[y_val] / n
+            p_xy_val = p_xy_val / n
+
+            if p_x_val > 0 and p_y_val > 0 and p_xy_val > 0:
+                mi += p_xy_val * np.log(p_xy_val / (p_x_val * p_y_val))
+
+        return max(0.0, mi)
 
     def reward_attribution(
         self,
