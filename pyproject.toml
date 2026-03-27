@@ -58,7 +58,6 @@ dev = [
 docs = [
     "sphinx",
     "sphinx-autodoc-typehints",
-    "sphinx.ext.napoleon",
     "myst-parser",
     "pydata-sphinx-theme",
 ]
