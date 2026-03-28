@@ -5,7 +5,10 @@ and non-RL trajectories (video prediction, planning, etc.).
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Union, Callable
+from typing import Any, Dict, List, Optional, Sequence, Union, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from world_model_lens.core.world_state import WorldState
 import torch
 
 

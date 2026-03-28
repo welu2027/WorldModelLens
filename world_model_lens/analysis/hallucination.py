@@ -11,7 +11,7 @@ hallucinated or unrealistic predictions:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Callable
 import torch
 import torch.nn.functional as F
 
@@ -75,7 +75,7 @@ class ReconstructionHallucinationDetector:
 
         return HallucinationResult(
             scores=errors,
-            is_ood=is_hallucinating,
+            is_hallucinating=is_hallucinating,
             threshold=self.threshold,
             method="reconstruction",
             details={

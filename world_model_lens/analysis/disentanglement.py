@@ -176,9 +176,9 @@ class DisentanglementAnalyzer:
         correlations = self.compute_correlation(latents, factors)
         importances = np.abs(correlations)
 
-        importance_sum = importance.sum(axis=1, keepdims=True)
+        importance_sum = importances.sum(axis=1, keepdims=True)
         importance_sum[importance_sum == 0] = 1
-        importance_normalized = importance / importance_sum
+        importance_normalized = importances / importance_sum
 
         n_factors = factors.shape[1]
         n_latents = latents.shape[1]

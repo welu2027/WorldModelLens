@@ -8,6 +8,11 @@ from collections import defaultdict
 from tqdm import tqdm
 
 from world_model_lens.core.activation_cache import ActivationCache
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from world_model_lens.hooked_world_model import HookedWorldModel
+    from world_model_lens.core.latent_trajectory import LatentTrajectory
 
 
 @dataclass
@@ -57,7 +62,7 @@ class Circuit:
     source: str
     target: str
 
-    def render_plotly(self) -> "go.Figure":
+    def render_plotly(self) -> Any:
         """Render circuit as interactive plotly graph."""
         try:
             import plotly.graph_objects as go

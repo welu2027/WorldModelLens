@@ -322,7 +322,7 @@ class TrajectoryAttribution:
 
         for ti, t in enumerate(timesteps):
             for dim_i in range(min(d_z, 10)):
-                for dim_j in range(dim_i + 1, min(dim_j + 1, 10)):
+                for dim_j in range(dim_i + 1, min(d_z, 10)):
                     # Measure second-order effect
                     effect = self._measure_pair_effect(t, dim_i, dim_j, metric)
                     interaction_matrix[ti, dim_i, dim_j] = effect

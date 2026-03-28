@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
+import pandas as pd
 
 from world_model_lens import HookedWorldModel, LatentTrajectory, LatentState
 

@@ -9,6 +9,10 @@ import json
 
 from world_model_lens.hub.model_hub import ModelHub as BaseModelHub
 from world_model_lens.hub.trajectory_hub import TrajectoryHub as BaseTrajectoryHub
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from world_model_lens.core.dataset import TrajectoryDataset
 
 
 class HuggingFaceModelHub(BaseModelHub):

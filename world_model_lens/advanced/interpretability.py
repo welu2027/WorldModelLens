@@ -10,12 +10,18 @@ Includes:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
+
+if TYPE_CHECKING:
+    from world_model_lens import HookedWorldModel
+    from world_model_lens.core import ActivationCache, WorldTrajectory
+    from world_model_lens.sae.sae import SparseAutoencoder as SAE
+    from world_model_lens.probing.prober import ProbeResult
 
 
 @dataclass

@@ -7,7 +7,10 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from world_model_lens.core.world_trajectory import WorldTrajectory
 import numpy as np
 import torch
 

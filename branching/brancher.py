@@ -13,11 +13,13 @@ if TYPE_CHECKING:
     from world_model_lens.core.activation_cache import ActivationCache
     from world_model_lens.core.latent_trajectory import LatentTrajectory
     from world_model_lens.hooked_world_model import HookedWorldModel
+    import pandas as pd
 
 
 # ---------------------------------------------------------------------------
 # BranchCollection
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class BranchCollection:
@@ -67,8 +69,7 @@ class BranchCollection:
             scores = []
             for traj in self.branches:
                 r = sum(
-                    float(s.reward_pred) if s.reward_pred is not None else 0.0
-                    for s in traj.states
+                    float(s.reward_pred) if s.reward_pred is not None else 0.0 for s in traj.states
                 )
                 scores.append(r)
             return self.branches[int(np.argmax(scores))]
@@ -90,8 +91,7 @@ class BranchCollection:
 
         for ax_i, (label, traj) in enumerate(zip(self.branch_labels, self.branches)):
             rewards = [
-                float(s.reward_pred) if s.reward_pred is not None else 0.0
-                for s in traj.states
+                float(s.reward_pred) if s.reward_pred is not None else 0.0 for s in traj.states
             ]
             axes[ax_i].plot(rewards, marker="o", markersize=3)
             axes[ax_i].set_title(label, fontsize=9)
@@ -108,14 +108,15 @@ class BranchCollection:
 # UncertaintyResult
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class UncertaintyResult:
     """Uncertainty estimate from an ensemble of imagined rollouts."""
 
     branches: List["LatentTrajectory"]
-    mean_rewards: np.ndarray           # (T,)
+    mean_rewards: np.ndarray  # (T,)
     epistemic_uncertainty: np.ndarray  # (T,) std of h across branches
-    reward_uncertainty: np.ndarray     # (T,) std of reward across branches
+    reward_uncertainty: np.ndarray  # (T,) std of reward across branches
 
     def plot_uncertainty_bands(self, ax=None):
         """Plot mean ± 2*std reward bands."""
@@ -130,7 +131,8 @@ class UncertaintyResult:
             ts,
             self.mean_rewards - 2 * self.reward_uncertainty,
             self.mean_rewards + 2 * self.reward_uncertainty,
-            alpha=0.3, label="±2σ reward",
+            alpha=0.3,
+            label="±2σ reward",
         )
         ax.plot(ts, self.mean_rewards, lw=2, label="mean reward")
         ax.set_xlabel("Timestep")
@@ -144,6 +146,7 @@ class UncertaintyResult:
 # BehaviorComparison
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class BehaviorComparison:
     """Comparison between a baseline and a modified imagined trajectory."""
@@ -151,13 +154,14 @@ class BehaviorComparison:
     baseline: "LatentTrajectory"
     modified: "LatentTrajectory"
     reward_delta: float
-    kl_divergence: np.ndarray   # (T,) per-timestep KL or L2 distance
+    kl_divergence: np.ndarray  # (T,) per-timestep KL or L2 distance
     description: str
 
 
 # ---------------------------------------------------------------------------
 # ImaginationBrancher
 # ---------------------------------------------------------------------------
+
 
 class ImaginationBrancher:
     """Fork imagined rollouts at any point in a trajectory.
@@ -236,8 +240,7 @@ class ImaginationBrancher:
         """Fork at fork_timestep and imagine forward with each action sequence."""
         if fork_timestep >= len(trajectory.states):
             raise ValueError(
-                f"fork_timestep={fork_timestep} >= trajectory length "
-                f"{len(trajectory.states)}"
+                f"fork_timestep={fork_timestep} >= trajectory length {len(trajectory.states)}"
             )
 
         state = trajectory.states[fork_timestep]
@@ -248,8 +251,7 @@ class ImaginationBrancher:
             branch_labels = [f"branch_{i}" for i in range(len(action_sequences))]
 
         branches = [
-            self._imagine_from_state(h0, z0, act_seq, horizon)
-            for act_seq in action_sequences
+            self._imagine_from_state(h0, z0, act_seq, horizon) for act_seq in action_sequences
         ]
         return BranchCollection(
             branches=branches,
@@ -282,12 +284,8 @@ class ImaginationBrancher:
         modified = self._imagine_from_state(h_mod, z_mod, action_sequence, horizon)
 
         # Compute metrics
-        r_base = sum(
-            s.reward_pred for s in baseline.states if s.reward_pred is not None
-        )
-        r_mod = sum(
-            s.reward_pred for s in modified.states if s.reward_pred is not None
-        )
+        r_base = sum(s.reward_pred for s in baseline.states if s.reward_pred is not None)
+        r_mod = sum(s.reward_pred for s in modified.states if s.reward_pred is not None)
         reward_delta = float(r_mod - r_base)  # type: ignore[operator]
 
         T = min(len(baseline.states), len(modified.states))
@@ -304,8 +302,7 @@ class ImaginationBrancher:
             reward_delta=reward_delta,
             kl_divergence=kl_div,
             description=(
-                f"Belief manipulation at t={fork_timestep}: "
-                f"reward delta = {reward_delta:+.4f}"
+                f"Belief manipulation at t={fork_timestep}: reward delta = {reward_delta:+.4f}"
             ),
         )
 
@@ -325,12 +322,16 @@ class ImaginationBrancher:
         z0 = state.z.detach().clone()
 
         noise_std = 0.01
+
         def _add_noise(z: Tensor) -> Tensor:
             return z + torch.randn_like(z) * noise_std
 
         return self.belief_manipulation_fork(
-            trajectory, fork_timestep, action_sequence,
-            horizon=horizon, z_patch_fn=_add_noise,
+            trajectory,
+            fork_timestep,
+            action_sequence,
+            horizon=horizon,
+            z_patch_fn=_add_noise,
         )
 
     # ------------------------------------------------------------------ #
@@ -357,11 +358,12 @@ class ImaginationBrancher:
         T = min(len(b.states) for b in branches)
 
         # Rewards
-        all_rewards = np.array([
-            [s.reward_pred if s.reward_pred is not None else 0.0
-             for s in b.states[:T]]
-            for b in branches
-        ])  # (n_samples, T)
+        all_rewards = np.array(
+            [
+                [s.reward_pred if s.reward_pred is not None else 0.0 for s in b.states[:T]]
+                for b in branches
+            ]
+        )  # (n_samples, T)
         mean_rewards = all_rewards.mean(axis=0)
         reward_uncertainty = all_rewards.std(axis=0)
 

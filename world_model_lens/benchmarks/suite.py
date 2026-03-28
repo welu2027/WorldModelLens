@@ -12,12 +12,16 @@ from __future__ import annotations
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from tqdm import tqdm
+
+if TYPE_CHECKING:
+    from world_model_lens.core.activation_cache import ActivationCache
+    from world_model_lens.hooked_world_model import HookedWorldModel
 
 
 @dataclass

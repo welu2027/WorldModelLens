@@ -13,7 +13,13 @@ except ImportError:
 
 import torch
 
-from world_model_lens import HookedWorldModel, LatentTrajectory, ActivationCache
+from world_model_lens import HookedWorldModel
+from world_model_lens.core.latent_trajectory import LatentTrajectory
+from world_model_lens.core.activation_cache import ActivationCache
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from world_model_lens.core.lazy_trajectory import TrajectoryDataset
 
 
 class EpisodeCollector:

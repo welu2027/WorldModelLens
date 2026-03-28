@@ -19,7 +19,7 @@ Usage:
         obs, reward, done, info = wm_env.step(action)
 """
 
-from typing import Any, Dict, Optional, Tuple, Union, Callable
+from typing import Any, Dict, Optional, Tuple, Union, Callable, TYPE_CHECKING
 import numpy as np
 import torch
 from dataclasses import dataclass
@@ -147,7 +147,7 @@ class WorldModelEnv:
         self._episode_length = 0
         self._trajectory_cache = []
 
-        if self.wm.config.get("store_logits", True):
+        if getattr(self.wm, "config", {}).get("store_logits", True):
             from world_model_lens.core.activation_cache import ActivationCache
 
             self._cache = ActivationCache()
