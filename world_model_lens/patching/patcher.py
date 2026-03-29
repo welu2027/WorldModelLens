@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
 import torch
 from torch import Tensor
 
@@ -10,8 +11,8 @@ try:
 except ImportError:
     tqdm = None
 
-from world_model_lens.core.hooks import HookPoint, HookContext
 from world_model_lens.core.activation_cache import ActivationCache
+from world_model_lens.core.hooks import HookContext, HookPoint
 from world_model_lens.core.latent_trajectory import LatentTrajectory
 from world_model_lens.core.world_trajectory import WorldTrajectory
 from world_model_lens.hooked_world_model import HookedWorldModel
@@ -148,6 +149,7 @@ class TemporalPatcher:
     def compute_metric_from_cache(
         self,
         cache: ActivationCache,
+        component: str,
         metric_fn: Callable[[ActivationCache], float],
     ) -> float:
         """Compute metric from activation cache.
@@ -159,7 +161,7 @@ class TemporalPatcher:
         Returns:
             Metric value.
         """
-        return metric_fn(cache)
+        return metric_fn(cache[component]) if component in list(cache.keys()) else 0.0
 
     def compute_metric_from_trajectory(
         self,
@@ -203,8 +205,10 @@ class TemporalPatcher:
         Returns:
             PatchResult with recovery rate.
         """
-        clean_metric = self.compute_metric_from_cache(clean_cache, metric_fn)
-        corrupted_metric = self.compute_metric_from_cache(corrupted_cache, metric_fn)
+        clean_metric = self.compute_metric_from_cache(clean_cache, patch_component, metric_fn)
+        corrupted_metric = self.compute_metric_from_cache(
+            corrupted_cache, patch_component, metric_fn
+        )
 
         if patch_value is None:
             patch_value = self._ensure_device(
@@ -235,9 +239,12 @@ class TemporalPatcher:
                 obs_seq = self._ensure_device(clean_obs_seq)
                 action_seq = self._ensure_device(clean_action_seq)
                 patched_traj, patched_cache = self.wm.run_with_cache(obs_seq, action_seq)
-                patched_metric = self.compute_metric_from_cache(patched_cache, metric_fn)
+                patched_metric = self.compute_metric_from_cache(
+                    patched_cache, patch_component, metric_fn
+                )
             else:
                 raise ValueError("clean_obs_seq and clean_action_seq required")
+
         except Exception as e:
             raise RuntimeError(f"Patching failed: {e}")
         finally:

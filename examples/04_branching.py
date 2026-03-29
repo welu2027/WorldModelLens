@@ -7,12 +7,12 @@ This example demonstrates:
 4. Measuring divergence
 """
 
-import torch
 import numpy as np
+import torch
+from world_model_lens.branching.brancher import ImaginationBrancher
 
 from world_model_lens import HookedWorldModel, WorldModelConfig
 from world_model_lens.backends.dreamerv3 import DreamerV3Adapter
-from world_model_lens.branching.brancher import ImaginationBrancher
 
 
 def main():
@@ -22,7 +22,7 @@ def main():
 
     cfg = WorldModelConfig(d_h=128, n_cat=16, n_cls=16, d_action=4, d_obs=12288)
     adapter = DreamerV3Adapter(cfg)
-    wm = HookedWorldModel(adapter=adapter, cfg=cfg)
+    wm = HookedWorldModel(adapter=adapter, config=cfg)
     brancher = ImaginationBrancher(wm)
 
     print("\n[1] Collecting real trajectory...")

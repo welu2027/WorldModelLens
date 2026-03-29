@@ -46,7 +46,7 @@ def main():
     components = ["h", "z_posterior", "z_prior"]
     timesteps = [5, 6, 7, 8, 9]
 
-    def reward_metric(pred):
+    def reward_metric(pred) -> float:
         return pred.mean().item() if pred is not None else 0.0
 
     sweep_result = patcher.full_sweep(
@@ -56,6 +56,8 @@ def main():
         metric_fn=reward_metric,
         t_range=timesteps,
         parallel=False,
+        clean_obs_seq=obs_seq,
+        clean_action_seq=action_seq,
     )
 
     print("\n[3] Top patches by recovery rate:")
