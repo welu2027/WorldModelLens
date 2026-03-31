@@ -11,6 +11,9 @@ copyright = "2023, World Model Lens Team"
 author = "World Model Lens Team"
 release = "0.2.0"
 
+# Root document (index.md via myst_parser extension)
+master_doc = "index"
+
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
@@ -92,8 +95,7 @@ autodoc_default_options = {
     "exclude-members": "__weakref__",
 }
 
-# Type hints
-typehints_formatter = "sphinx_autodoc_typehints.format_annotation"
+# Type hints (must be a callable or None; string paths are not supported in recent sphinx-autodoc-typehints)
 
 # Intersphinx mapping
 intersphinx_mapping = {

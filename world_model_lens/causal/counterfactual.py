@@ -13,11 +13,14 @@ Mathematical Framework:
 - Divergence: D(τ_o, τ_c)
 """
 
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-import torch
+
 import numpy as np
-from collections import deque
+import torch
+
+from world_model_lens.core.hooks import HookPoint
 
 
 @dataclass
@@ -228,30 +231,31 @@ class CounterfactualEngine:
         Returns:
             Counterfactual WorldTrajectory
         """
-        # Build hook from intervention
-        hook_spec = self._intervention_to_hook(intervention)
-
         intervention_fn = self._make_intervention_fn(intervention)
+        component = self._hook_component_for_intervention(intervention)
+        hook = HookPoint(
+            name=component,
+            fn=intervention_fn,
+            timestep=intervention.target_timestep,
+        )
 
-        cf_traj, _ = self.wm.run_with_advanced_hooks(
-            observations,
-            actions,
-            hook_specs={hook_spec: intervention_fn},
+        cf_traj = self.wm.run_with_hooks(
+            observations=observations,
+            actions=actions,
+            fwd_hooks=[hook],
         )
 
         return cf_traj
 
-    def _intervention_to_hook(self, intervention: Intervention) -> str:
-        """Convert intervention to hook specification string."""
+    def _hook_component_for_intervention(self, intervention: Intervention) -> str:
+        """Map intervention target to HookedWorldModel component names (see run_with_cache)."""
         if intervention.target_type == "dimension":
-            if intervention.target_indices and len(intervention.target_indices) == 1:
-                dim = intervention.target_indices[0]
-                return f"z[{dim}:{dim + 1}]"
-            elif intervention.target_indices:
-                start = min(intervention.target_indices)
-                end = max(intervention.target_indices) + 1
-                return f"z[{start}:{end}]"
-        return f"t={intervention.target_timestep}.z"
+            return "z_posterior"
+        if intervention.target_type == "action":
+            return "action"
+        if intervention.target_type == "state":
+            return "state"
+        return "z_posterior"
 
     def _make_intervention_fn(self, intervention: Intervention) -> Callable:
         """Create intervention function from intervention spec."""
@@ -356,12 +360,17 @@ class CounterfactualEngine:
         dummy_obs = torch.randn(horizon, 3, 64, 64)
 
         intervention_fn = self._make_intervention_fn(intervention)
-        hook_spec = self._intervention_to_hook(intervention)
+        component = self._hook_component_for_intervention(intervention)
+        hook = HookPoint(
+            name=component,
+            fn=intervention_fn,
+            timestep=intervention.target_timestep,
+        )
 
-        # Run with hooks
-        cf_traj, _ = self.wm.run_with_advanced_hooks(
+        cf_traj = self.wm.run_with_hooks(
             dummy_obs,
-            hook_specs={hook_spec: intervention_fn},
+            actions=None,
+            fwd_hooks=[hook],
         )
 
         return cf_traj

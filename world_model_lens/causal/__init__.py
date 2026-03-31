@@ -10,7 +10,7 @@ Level 2 (State): Latent Vector
     - Full state-level interventions
     - Representation-level causality
 
-Level 3 (Trajectory): Sequence-Level
+Level 3 (Trajectory): Sequence-Leveli
     - Temporal causal chains
     - Long-horizon effect propagation
 
@@ -20,14 +20,15 @@ Key Components:
 - CounterfactualEngine: Branching rollouts and divergence analysis
 """
 
-from world_model_lens.causal.effect_estimator import CausalEffectEstimator, CausalEffect
-from world_model_lens.causal.trajectory_attribution import TrajectoryAttribution, AttributionResult
 from world_model_lens.causal.counterfactual import (
-    CounterfactualEngine,
     BranchTree,
+    CounterfactualEngine,
     DivergenceMetrics,
+    Intervention,
     rollout_comparison,
 )
+from world_model_lens.causal.effect_estimator import CausalEffect, CausalEffectEstimator
+from world_model_lens.causal.trajectory_attribution import AttributionResult, TrajectoryAttribution
 
 __all__ = [
     "CausalEffectEstimator",
@@ -36,6 +37,7 @@ __all__ = [
     "AttributionResult",
     "CounterfactualEngine",
     "BranchTree",
+    "Intervention",
     "DivergenceMetrics",
     "rollout_comparison",
 ]

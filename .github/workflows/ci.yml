@@ -65,7 +65,7 @@ jobs:
         with:
           python-version: '3.10'
       - run: pip install -e ".[docs]"
-      - run: mkdocs build
+      - run: sphinx-build -b html docs docs/_build
 
   build-wheel:
     runs-on: ubuntu-latest
