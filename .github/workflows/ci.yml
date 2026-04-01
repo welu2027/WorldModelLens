@@ -51,9 +51,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-          # Install CPU build of PyTorch so tests that import torch run on GitHub Actions.
-          # Pin a version for reproducibility (change as needed).
-          pip install torch==2.2.0
+          # Install CPU build of PyTorch from the official PyTorch index. Using the
+          # CPU wheels avoids CUDA/toolkit requirements on GitHub hosted runners.
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
+          # Sanity-check the installation
+          python -c "import importlib,sys; importlib.invalidate_caches(); print('PYTHON', sys.version.replace('\\n',' ')); import torch; print('TORCH', torch.__version__)"
       - run: pytest tests/ -v --cov=world_model_lens --cov-report=xml --cov-fail-under=90
       - uses: codecov/codecov-action@v4
         with:
