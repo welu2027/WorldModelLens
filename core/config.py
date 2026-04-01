@@ -23,12 +23,11 @@ True
 from __future__ import annotations
 
 import dataclasses
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional, Tuple, Union
+from typing import Any
 
 import yaml
-
 
 # Sentinel to detect missing required fields in from_dict
 _MISSING = object()
@@ -48,7 +47,7 @@ class WorldModelConfig:
         length.
     d_obs:
         Dimensionality of the raw observation (e.g. ``64*64*3 = 12288`` for
-        a 64×64 RGB image that has been flattened by the encoder input layer).
+        a 64x64 RGB image that has been flattened by the encoder input layer).
 
     Optional Parameters (with defaults)
     ------------------------------------
@@ -84,6 +83,7 @@ class WorldModelConfig:
 
     Examples
     --------
+
     >>> cfg = WorldModelConfig(d_h=512, d_action=4, d_obs=4)
     >>> cfg.d_z
     1024
@@ -155,28 +155,22 @@ class WorldModelConfig:
         _valid_encoders = {"cnn", "mlp", "transformer"}
         if self.encoder_type not in _valid_encoders:
             errors.append(
-                f"encoder_type must be one of {_valid_encoders}, "
-                f"got {self.encoder_type!r}."
+                f"encoder_type must be one of {_valid_encoders}, got {self.encoder_type!r}."
             )
 
         _valid_backends = {"dreamer", "tdmpc", "rssm", "custom"}
         if self.backend not in _valid_backends:
-            errors.append(
-                f"backend must be one of {_valid_backends}, "
-                f"got {self.backend!r}."
-            )
+            errors.append(f"backend must be one of {_valid_backends}, got {self.backend!r}.")
 
         _valid_reward_heads = {"mlp", "linear"}
         if self.reward_head not in _valid_reward_heads:
             errors.append(
-                f"reward_head must be one of {_valid_reward_heads}, "
-                f"got {self.reward_head!r}."
+                f"reward_head must be one of {_valid_reward_heads}, got {self.reward_head!r}."
             )
 
         if errors:
             raise ValueError(
-                "WorldModelConfig validation failed:\n"
-                + "\n".join(f"  • {e}" for e in errors)
+                "WorldModelConfig validation failed:\n" + "\n".join(f"  • {e}" for e in errors)
             )
 
     # ------------------------------------------------------------------
@@ -185,7 +179,7 @@ class WorldModelConfig:
 
     @property
     def d_z(self) -> int:
-        """Stochastic latent dimension: ``n_cat × n_cls``.
+        """Stochastic latent dimension: ``n_cat x n_cls``.
 
         Returns
         -------
@@ -194,6 +188,7 @@ class WorldModelConfig:
 
         Examples
         --------
+
         >>> WorldModelConfig(512, 4, 64, n_cat=32, n_cls=32).d_z
         1024
         """
@@ -212,13 +207,14 @@ class WorldModelConfig:
 
         Examples
         --------
+
         >>> WorldModelConfig(512, 4, 64).d_latent
         1536    # 512 + 1024
         """
         return self.d_h + self.d_z
 
     @property
-    def latent_shape(self) -> Tuple[int, int]:
+    def latent_shape(self) -> tuple[int, int]:
         """2-D shape of the categorical latent: ``(n_cat, n_cls)``.
 
         Returns
@@ -227,6 +223,7 @@ class WorldModelConfig:
 
         Examples
         --------
+
         >>> cfg.latent_shape
         (32, 32)
         """
@@ -236,7 +233,7 @@ class WorldModelConfig:
     # Serialisation helpers
     # ------------------------------------------------------------------
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Serialise to a plain Python dictionary.
 
         All fields (including defaults) are included.  The dict is suitable
@@ -249,13 +246,14 @@ class WorldModelConfig:
 
         Examples
         --------
+
         >>> cfg.to_dict()['d_h']
         512
         """
         return dataclasses.asdict(self)
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "WorldModelConfig":
+    def from_dict(cls, data: dict[str, Any]) -> WorldModelConfig:
         """Construct a :class:`WorldModelConfig` from a plain dict.
 
         Unknown keys are silently ignored so that configs from future
@@ -281,13 +279,14 @@ class WorldModelConfig:
 
         for required in ("d_h", "d_action", "d_obs"):
             if required not in filtered:
-                raise TypeError(
-                    f"WorldModelConfig.from_dict(): required field "
+                msg = (
+                    "WorldModelConfig.from_dict(): required field "
                     f"'{required}' is missing from the provided dict."
                 )
+                raise TypeError(msg)
         return cls(**filtered)
 
-    def save(self, path: Union[str, Path]) -> None:
+    def save(self, path: str | Path) -> None:
         """Serialise to a YAML file.
 
         Parameters
@@ -302,11 +301,11 @@ class WorldModelConfig:
         """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w") as f:
+        with path.open("w") as f:
             yaml.safe_dump(self.to_dict(), f, sort_keys=True, default_flow_style=False)
 
     @classmethod
-    def load(cls, path: Union[str, Path]) -> "WorldModelConfig":
+    def load(cls, path: str | Path) -> WorldModelConfig:
         """Load a :class:`WorldModelConfig` from a YAML file.
 
         Parameters
@@ -329,12 +328,13 @@ class WorldModelConfig:
         """
         path = Path(path)
         if not path.exists():
-            raise FileNotFoundError(f"Config file not found: {path}")
-        with open(path) as f:
+            msg = f"Config file not found: {path}"
+            raise FileNotFoundError(msg)
+        with path.open() as f:
             data = yaml.safe_load(f)
         return cls.from_dict(data)
 
-    def replace(self, **changes: Any) -> "WorldModelConfig":
+    def replace(self, **changes: object) -> WorldModelConfig:
         """Return a copy of this config with *changes* applied.
 
         Equivalent to :func:`dataclasses.replace` but more discoverable.
@@ -350,6 +350,7 @@ class WorldModelConfig:
 
         Examples
         --------
+
         >>> big_cfg = cfg.replace(d_h=1024, n_cat=64)
         """
         return dataclasses.replace(self, **changes)
@@ -359,6 +360,7 @@ class WorldModelConfig:
     # ------------------------------------------------------------------
 
     def __repr__(self) -> str:
+        """Return a compact representation for debugging/logging."""
         return (
             f"WorldModelConfig("
             f"name={self.name!r}, "

@@ -1,14 +1,14 @@
 """Configuration dataclass for world model architectures."""
 
-from dataclasses import dataclass, field
-from typing import Literal, Optional
+from dataclasses import dataclass
+from typing import Literal
 
 from world_model_lens.core.types import (
-    LatentType,
     DynamicsType,
+    LatentType,
     ModelPurpose,
-    WorldModelFamily,
     ObservationModality,
+    WorldModelFamily,
 )
 
 
@@ -86,7 +86,7 @@ class WorldModelConfig:
     kl_scale: float = 1.0
     actor_entropy_scale: float = 1e-4
     imagination_horizon: int = 50
-    seed: Optional[int] = None
+    seed: int | None = None
 
     latent_type: LatentType = LatentType.DISCRETE_CATEGORICAL
     dynamics_type: DynamicsType = DynamicsType.RECURRENT

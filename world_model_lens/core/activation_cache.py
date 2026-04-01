@@ -1,8 +1,10 @@
 """Activation cache for storing and retrieving intermediate activations."""
 
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union, cast
-import torch
+from collections.abc import Callable, Iterable
+from typing import Any
+
 import pandas as pd
+import torch
 
 
 class ActivationCache:
@@ -19,12 +21,11 @@ class ActivationCache:
     """
 
     def __init__(self):
-        self._store: Dict[Tuple[str, int], Union[torch.Tensor, Callable[[], torch.Tensor]]] = {}
-        self._evaluated: Dict[Tuple[str, int], torch.Tensor] = {}
+        self._store: dict[tuple[str, int], torch.Tensor | Callable[[], torch.Tensor]] = {}
+        self._evaluated: dict[tuple[str, int], torch.Tensor] = {}
 
     def __getitem__(
-        self,
-        key: Union[Tuple[str, int], Tuple[str, slice], Tuple[str, str], str],
+        self, key: str | tuple[str, int] | tuple[str, slice] | tuple[str, str]
     ) -> torch.Tensor:
         """Access cached activations.
 
@@ -69,21 +70,19 @@ class ActivationCache:
 
     def _get_all(self, name: str) -> torch.Tensor:
         """Get all timesteps stacked."""
-        timesteps = sorted(set(t for n, t in self._store.keys() if n == name))
+        timesteps = sorted({t for n, t in self._store.keys() if n == name})
         if not timesteps:
             raise KeyError(f"No cached activations for '{name}'")
         return torch.stack([self._get_single(name, t) for t in timesteps], dim=0)
 
     def _get_slice(self, name: str, slc: slice) -> torch.Tensor:
         """Get a slice of timesteps."""
-        timesteps = sorted(set(t for n, t in self._store.keys() if n == name))
+        timesteps = sorted({t for n, t in self._store.keys() if n == name})
         sliced = timesteps[slc]
         return torch.stack([self._get_single(name, t) for t in sliced], dim=0)
 
     def __setitem__(
-        self,
-        key: Tuple[str, int],
-        value: Union[torch.Tensor, Callable[[], torch.Tensor]],
+        self, key: tuple[str, int], value: torch.Tensor | Callable[[], torch.Tensor]
     ) -> None:
         """Store an activation.
 
@@ -95,30 +94,25 @@ class ActivationCache:
         self._store[key] = value
         self._evaluated.pop(key, None)
 
-    def __contains__(self, key: Tuple[str, int]) -> bool:
+    def __contains__(self, key: tuple[str, int]) -> bool:
         """Check if a key exists in the cache."""
         return key in self._store or key in self._evaluated
 
-    def keys(self) -> Iterable[Tuple[str, int]]:
+    def keys(self) -> Iterable[tuple[str, int]]:
         """Iterate over all (component, timestep) pairs."""
         return self._store.keys()
 
     @property
-    def component_names(self) -> List[str]:
+    def component_names(self) -> list[str]:
         """List of unique component names in cache."""
-        return sorted(set(n for n, _ in self._store.keys()))
+        return sorted({n for n, _ in self._store.keys()})
 
     @property
-    def timesteps(self) -> List[int]:
+    def timesteps(self) -> list[int]:
         """List of timesteps with cached activations."""
-        return sorted(set(t for _, t in self._store.keys()))
+        return sorted({t for _, t in self._store.keys()})
 
-    def get(
-        self,
-        name: str,
-        timestep: int,
-        default: Any = None,
-    ) -> Optional[torch.Tensor]:
+    def get(self, name: str, timestep: int, default: Any = None) -> torch.Tensor | None:
         """Get with default if not found."""
         try:
             return self._get_single(name, timestep)
@@ -154,7 +148,7 @@ class ActivationCache:
             self._evaluated[key] = self._evaluated[key].detach()
         return self
 
-    def filter(self, names: List[str]) -> "ActivationCache":
+    def filter(self, names: list[str]) -> "ActivationCache":
         """Return a new cache with only specified components.
 
         Args:
@@ -178,9 +172,9 @@ class ActivationCache:
         try:
             posterior = self["z_posterior"]
             prior = self["z_prior"]
-            T = posterior.shape[0]
-            kl_vals = []
-            for t in range(T):
+            total_steps = int(posterior.shape[0])
+            kl_vals: list[float] = []
+            for t in range(total_steps):
                 p = posterior[t]
                 q = prior[t]
                 p = p.clamp(min=1e-8)
@@ -190,8 +184,8 @@ class ActivationCache:
                 kl = (p * (p.log() - q.log())).sum(dim=-1)
                 kl_vals.append(kl.sum().item())
             return torch.tensor(kl_vals)
-        except KeyError:
-            raise KeyError("Cache must contain z_posterior and z_prior for surprise()")
+        except KeyError as err:
+            raise KeyError("Cache must contain z_posterior and z_prior for surprise()") from err
 
     def stacked(self, name: str) -> torch.Tensor:
         """Explicitly return all timesteps for `name` stacked along dim=0.
@@ -202,7 +196,7 @@ class ActivationCache:
         return self._get_all(name)
 
     def diff(
-        self, other: "ActivationCache", names: Optional[List[str]] = None, absolute: bool = True
+        self, other: "ActivationCache", names: list[str] | None = None, absolute: bool = True
     ) -> "ActivationCache":
         """Compute per-key tensor differences between this cache and `other`.
 
@@ -224,8 +218,8 @@ class ActivationCache:
         for name in names:
             # get sorted timesteps present in both
             timesteps = sorted(
-                set(t for n, t in self._store.keys() if n == name)
-                & set(t for n, t in other._store.keys() if n == name)
+                {t for n, t in self._store.keys() if n == name}
+                & {t for n, t in other._store.keys() if n == name}
             )
             for t in timesteps:
                 a = self._get_single(name, t)
@@ -252,7 +246,7 @@ class ActivationCache:
         flat = diffs.reshape(diffs.shape[0], -1)
         return torch.norm(flat, p=p, dim=1)
 
-    def most_variable_timesteps(self, name: str, top_k: int = 5) -> List[int]:
+    def most_variable_timesteps(self, name: str, top_k: int = 5) -> list[int]:
         """Return the timesteps with the largest temporal changes for `name`.
 
         The returned timesteps correspond to the later timestep of each change
@@ -265,25 +259,25 @@ class ActivationCache:
         k = min(top_k, vari.numel())
         vals, idx = torch.topk(vari, k)
         # map indices (0..T-2) to actual timestep numbers (use stored timesteps)
-        timesteps = sorted(set(t for n, t in self._store.keys() if n == name))
+        timesteps = sorted({t for n, t in self._store.keys() if n == name})
         result = [timesteps[i + 1] for i in idx.tolist()]
         return result
 
-    def timesteps_exceeding_surprise(self, threshold: float) -> List[int]:
+    def timesteps_exceeding_surprise(self, threshold: float) -> list[int]:
         """Return timesteps where surprise() exceeds `threshold`.
 
         Uses the same ordering as `surprise()` / `stacked('z_posterior')`.
         """
         kl = self.surprise()
         timesteps = sorted(
-            set(t for _, t in self._store.keys() if _ == "z_posterior" or _ == "z_prior")
+            {t for _, t in self._store.keys() if _ == "z_posterior" or _ == "z_prior"}
         )
         # surprise() raises if z_prior/posterior missing; map indices to sorted timesteps
         exceed_idx = (kl > threshold).nonzero(as_tuple=True)[0].tolist()
         return [timesteps[i] for i in exceed_idx]
 
     def compare_summary(
-        self, other: "ActivationCache", names: Optional[List[str]] = None, p: float = 2.0
+        self, other: "ActivationCache", names: list[str] | None = None, p: float = 2.0
     ) -> pd.DataFrame:
         """Produce a DataFrame summarizing normed differences per (component,timestep).
 
@@ -294,8 +288,8 @@ class ActivationCache:
             names = sorted(set(self.component_names) & set(other.component_names))
         for name in names:
             timesteps = sorted(
-                set(t for n, t in self._store.keys() if n == name)
-                & set(t for n, t in other._store.keys() if n == name)
+                {t for n, t in self._store.keys() if n == name}
+                & {t for n, t in other._store.keys() if n == name}
             )
             for t in timesteps:
                 a = self._get_single(name, t)
@@ -324,9 +318,7 @@ class ActivationCache:
         return pd.DataFrame(records)
 
     def materialize(
-        self,
-        names: Optional[List[str]] = None,
-        timesteps: Optional[List[int]] = None,
+        self, names: list[str] | None = None, timesteps: list[int] | None = None
     ) -> "ActivationCache":
         """Pre-compute a subset of lazy callables into tensors.
 
@@ -368,4 +360,8 @@ class ActivationCache:
         return total_bytes / (1024**3)
 
 
+# Re-export CacheQuery for backward compatibility. Import after ActivationCache
+# is defined to avoid a circular import (cache_query imports ActivationCache).
 from .cache_query import CacheQuery  # re-export for backward compatibility
+
+__all__ = ["ActivationCache", "CacheQuery"]
