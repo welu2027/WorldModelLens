@@ -49,14 +49,22 @@ jobs:
             ${{ runner.os }}-pip-${{ matrix.python-version }}-
       - name: Install dependencies
         run: |
+          set -eux
           python -m pip install --upgrade pip
-          pip install -e ".[dev]"
-          # Install CPU build of PyTorch from the official PyTorch index. Using the
-          # CPU wheels avoids CUDA/toolkit requirements on GitHub hosted runners.
-          python -m pip install --index-url https://download.pytorch.org/whl/cpu torch
-          # Sanity-check the installation
-          python -c "import importlib,sys; importlib.invalidate_caches(); print('PYTHON', sys.version.replace('\\n',' ')); import torch; print('TORCH', torch.__version__)"
-      - run: pytest tests/ -v --cov=world_model_lens --cov-report=xml --cov-fail-under=90
+          # Install CPU build of PyTorch first so dependency resolution for the
+          # editable install doesn't try to fetch a different (or missing)
+          # wheel. Use the official CPU wheel index and fall back to PyPI.
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple "torch"
+          # Install editable dev dependencies afterwards (will reuse installed torch)
+          python -m pip install -e ".[dev]"
+          # Diagnostics: show which python, pip, and whether torch is available
+          which python || true
+          python -V
+          python -m pip --version
+          python -m pip show torch || true
+          python -c "import importlib,sys; importlib.invalidate_caches(); print('PYTHON', sys.version.replace('\\n',' ')); import pkgutil; print('PYTHON PATH:', sys.path); import torch; print('TORCH', torch.__version__); print('TORCH PATH', getattr(torch, '__file__', 'n/a'))"
+          python -m pip list
+      - run: python -m pytest tests/ -v --cov=world_model_lens --cov-report=xml --cov-fail-under=90
       - uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
