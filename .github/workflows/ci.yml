@@ -13,10 +13,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - run: pip install ruff pre-commit
+
+      - name: Install lint tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff pre-commit
+
       - run: ruff check world_model_lens/
       - run: pre-commit run --all-files
 
@@ -24,10 +30,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - run: pip install pyright
+
+      - name: Install typechecker
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyright
+
       - run: pyright world_model_lens/
 
   test:
@@ -35,11 +47,14 @@ jobs:
     strategy:
       matrix:
         python-version: ['3.9', '3.10', '3.11']
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -47,24 +62,32 @@ jobs:
           key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('**/pyproject.toml') }}
           restore-keys: |
             ${{ runner.os }}-pip-${{ matrix.python-version }}-
+
       - name: Install dependencies
         run: |
           set -eux
+
           python -m pip install --upgrade pip
-          # Install CPU build of PyTorch first so dependency resolution for the
-          # editable install doesn't try to fetch a different (or missing)
-          # wheel. Use the official CPU wheel index and fall back to PyPI.
-          python -m pip install --index-url https://download.pytorch.org/whl/cpu --extra-index-url https://pypi.org/simple "torch"
-          # Install editable dev dependencies afterwards (will reuse installed torch)
+
+          # Install PyTorch CPU build FIRST (critical)
+          python -m pip install \
+            --index-url https://download.pytorch.org/whl/cpu \
+            --extra-index-url https://pypi.org/simple \
+            torch
+
+          # Install project (reuses torch)
           python -m pip install -e ".[dev]"
-          # Diagnostics: show which python, pip, and whether torch is available
-          which python || true
-          python -V
-          python -m pip --version
-          python -m pip show torch || true
-          python -c "import importlib,sys; importlib.invalidate_caches(); print('PYTHON', sys.version.replace('\\n',' ')); import pkgutil; print('PYTHON PATH:', sys.path); import torch; print('TORCH', torch.__version__); print('TORCH PATH', getattr(torch, '__file__', 'n/a'))"
-          python -m pip list
-      - run: python -m pytest tests/ -v --cov=world_model_lens --cov-report=xml --cov-fail-under=90
+
+          # Sanity check
+          python -c "import torch; print('Torch:', torch.__version__)"
+
+      - name: Run tests
+        run: |
+          pytest tests/ -v \
+            --cov=world_model_lens \
+            --cov-report=xml \
+            --cov-fail-under=90
+
       - uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -72,33 +95,58 @@ jobs:
   test-gpu:
     runs-on: self-hosted
     if: github.repository == 'Bhavith-Chandra/WorldModelLens'
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - run: pip install -e ".[dev]" torch
+
+      - name: Install dependencies (GPU)
+        run: |
+          python -m pip install --upgrade pip
+
+          # Let pip resolve GPU torch (assuming CUDA env present)
+          pip install torch
+
+          pip install -e ".[dev]"
+
+          python -c "import torch; print('CUDA available:', torch.cuda.is_available())"
+
       - run: pytest tests/ -v --gpu
 
   build-docs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - run: pip install -e ".[docs]"
+
+      - name: Install docs dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[docs]"
+
       - run: sphinx-build -b html docs docs/_build
 
   build-wheel:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - run: pip install build
-      - run: python -m build
+
+      - name: Build package
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+          python -m build
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist
@@ -108,16 +156,22 @@ jobs:
     needs: [lint, typecheck, test, build-wheel]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
+
     steps:
       - uses: actions/download-artifact@v4
         with:
           name: dist
           path: dist/
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-      - run: pip install twine
-      - env:
+
+      - name: Publish to PyPI
+        run: |
+          python -m pip install --upgrade pip
+          pip install twine
+          twine upload dist/*
+        env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
-        run: twine upload dist/*
