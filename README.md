@@ -112,6 +112,19 @@ pip install world-model-lens
 git clone https://github.com/Bhavith-Chandra/WorldModelLens
 cd world_model_lens
 pip install -e ".[dev]"
+
+### Dev environment notes
+
+If you plan to run tests or examples that import PyTorch, install a CPU build of
+PyTorch in your virtual environment. Example:
+
+```bash
+python -m pip install --upgrade pip
+# CPU build
+pip install torch
+# or pin a version:
+pip install "torch==2.2.0"
+```
 ```
 
 ### Optional Dependencies
