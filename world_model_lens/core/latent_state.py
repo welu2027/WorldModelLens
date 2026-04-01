@@ -1,7 +1,8 @@
 """Latent state representation for a single timestep."""
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
+
 import torch
 
 
@@ -30,15 +31,15 @@ class LatentState:
     z_posterior: torch.Tensor
     z_prior: torch.Tensor
     timestep: int = 0
-    action: Optional[torch.Tensor] = None
-    reward_pred: Optional[torch.Tensor] = None
-    reward_real: Optional[torch.Tensor] = None
-    cont_pred: Optional[torch.Tensor] = None
-    value_pred: Optional[torch.Tensor] = None
-    actor_logits: Optional[torch.Tensor] = None
-    obs_encoding: Optional[torch.Tensor] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
-    multimodal_channels: Dict[str, torch.Tensor] = field(default_factory=dict)
+    action: torch.Tensor | None = None
+    reward_pred: torch.Tensor | None = None
+    reward_real: torch.Tensor | None = None
+    cont_pred: torch.Tensor | None = None
+    value_pred: torch.Tensor | None = None
+    actor_logits: torch.Tensor | None = None
+    obs_encoding: torch.Tensor | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    multimodal_channels: dict[str, torch.Tensor] = field(default_factory=dict)
 
     @property
     def flat(self) -> torch.Tensor:
@@ -137,7 +138,7 @@ class LatentState:
         }
         return new_state
 
-    def get_multimodal_channel(self, channel_name: str) -> Optional[torch.Tensor]:
+    def get_multimodal_channel(self, channel_name: str) -> torch.Tensor | None:
         """Get a specific multimodal channel tensor.
 
         Args:
@@ -153,6 +154,6 @@ class LatentState:
         return channel_name in self.multimodal_channels
 
     @property
-    def channel_names(self) -> List[str]:
+    def channel_names(self) -> list[str]:
         """List of available multimodal channel names."""
         return list(self.multimodal_channels.keys())

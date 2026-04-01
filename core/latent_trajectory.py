@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 import torch
 
@@ -62,7 +62,7 @@ class LatentTrajectory:
     # ------------------------------------------------------------------
     # Required fields
     # ------------------------------------------------------------------
-    states: List[LatentState]
+    states: list[LatentState]
     """Ordered per-step latent states."""
 
     env_name: str
@@ -77,10 +77,10 @@ class LatentTrajectory:
     imagined: bool = False
     """Whether the trajectory is an imagined rollout."""
 
-    fork_point: Optional[int] = None
+    fork_point: int | None = None
     """Step index from which this trajectory was forked, or ``None``."""
 
-    metadata: Optional[Dict[str, Any]] = field(default=None)
+    metadata: dict[str, Any] | None = field(default=None)
     """Arbitrary extra annotations."""
 
     # ------------------------------------------------------------------
@@ -159,7 +159,7 @@ class LatentTrajectory:
         return torch.stack([s.kl for s in self.states], dim=0)
 
     @property
-    def rewards_pred(self) -> Optional[torch.Tensor]:
+    def rewards_pred(self) -> torch.Tensor | None:
         """Predicted rewards stacked to shape ``(T,)``, or ``None`` if absent.
 
         Returns ``None`` if *any* state in the trajectory is missing
@@ -178,7 +178,7 @@ class LatentTrajectory:
         )
 
     @property
-    def rewards_real(self) -> Optional[torch.Tensor]:
+    def rewards_real(self) -> torch.Tensor | None:
         """Ground-truth rewards stacked to shape ``(T,)``, or ``None`` if absent.
 
         Returns
@@ -194,7 +194,7 @@ class LatentTrajectory:
         )
 
     @property
-    def actions(self) -> Optional[torch.Tensor]:
+    def actions(self) -> torch.Tensor | None:
         """Actions stacked to shape ``(T, *action_shape)``, or ``None`` if absent.
 
         Returns ``None`` if *any* step has ``action=None``.
@@ -216,7 +216,7 @@ class LatentTrajectory:
     # Methods
     # ------------------------------------------------------------------
 
-    def surprise_peaks(self, threshold: float) -> List[int]:
+    def surprise_peaks(self, threshold: float) -> list[int]:
         """Return step indices where the KL surprise exceeds *threshold*.
 
         Iterates over all states and collects indices where
@@ -245,7 +245,7 @@ class LatentTrajectory:
             if s.kl.item() > threshold
         ]
 
-    def slice(self, start: int, end: int) -> "LatentTrajectory":
+    def slice(self, start: int, end: int) -> LatentTrajectory:
         """Return a sub-trajectory from step *start* (inclusive) to *end* (exclusive).
 
         The returned :class:`LatentTrajectory` shares the same ``env_name``
@@ -293,7 +293,7 @@ class LatentTrajectory:
             metadata={**(self.metadata or {}), "_sliced_from": self.episode_id},
         )
 
-    def to_device(self, device: Union[str, torch.device]) -> "LatentTrajectory":
+    def to_device(self, device: str | torch.device) -> LatentTrajectory:
         """Return a copy with all :class:`LatentState` tensors moved to *device*.
 
         Parameters
@@ -318,7 +318,7 @@ class LatentTrajectory:
             states=[s.to_device(device) for s in self.states],
         )
 
-    def fork_at(self, timestep: int) -> "LatentTrajectory":
+    def fork_at(self, timestep: int) -> LatentTrajectory:
         """Create a new imagined trajectory starting from *timestep*.
 
         Returns a :class:`LatentTrajectory` consisting of the states from

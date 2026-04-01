@@ -35,8 +35,9 @@ Example
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any
 
 import torch
 
@@ -78,10 +79,10 @@ class HookContext:
     component: str
     """Name of the component whose activation is being intercepted."""
 
-    trajectory_so_far: Optional[Any] = None
+    trajectory_so_far: Any | None = None
     """Partial LatentTrajectory up to (but not including) this timestep."""
 
-    metadata: Optional[Dict[str, Any]] = field(default=None)
+    metadata: dict[str, Any] | None = field(default=None)
     """Arbitrary extra context supplied by the calling code."""
 
 
@@ -136,7 +137,7 @@ class HookPoint:
     fn: HookFn
     """Hook function: ``(tensor, context) -> tensor``."""
 
-    timestep: Optional[int] = None
+    timestep: int | None = None
     """Specific timestep to fire on, or ``None`` for all timesteps."""
 
     def matches(self, component: str, timestep: int) -> bool:
@@ -182,7 +183,7 @@ class HookRegistry:
     """
 
     def __init__(self) -> None:
-        self._hooks: List[HookPoint] = []
+        self._hooks: list[HookPoint] = []
 
     # ------------------------------------------------------------------
     # Registration
@@ -208,7 +209,7 @@ class HookRegistry:
             )
         self._hooks.append(hook)
 
-    def clear(self, name: Optional[str] = None) -> None:
+    def clear(self, name: str | None = None) -> None:
         """Remove hooks from the registry.
 
         Parameters
@@ -231,7 +232,7 @@ class HookRegistry:
     # Query
     # ------------------------------------------------------------------
 
-    def get_hooks_for(self, component: str, timestep: int) -> List[HookPoint]:
+    def get_hooks_for(self, component: str, timestep: int) -> list[HookPoint]:
         """Return all hooks that should fire for *component* at *timestep*.
 
         Hooks are returned in registration order.

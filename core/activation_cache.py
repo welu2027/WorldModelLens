@@ -15,23 +15,12 @@ Indexing interface
 
 from __future__ import annotations
 
-from typing import (
-    Any,
-    Callable,
-    Dict,
-    Iterable,
-    Iterator,
-    List,
-    Optional,
-    Sequence,
-    Tuple,
-    Union,
-)
+from collections.abc import Callable, Iterable, Iterator, Sequence
 
 import torch
 
 # Lazy value: either a tensor or a zero-arg callable that returns one.
-_StoredValue = Union[torch.Tensor, Callable[[], torch.Tensor]]
+_StoredValue = torch.Tensor | Callable[[], torch.Tensor]
 
 
 class ActivationCache:
@@ -68,12 +57,9 @@ class ActivationCache:
     # Construction
     # ------------------------------------------------------------------
 
-    def __init__(
-        self,
-        data: Optional[Dict[Tuple[str, int], _StoredValue]] = None,
-    ) -> None:
+    def __init__(self, data: dict[tuple[str, int], _StoredValue] | None = None) -> None:
         # _store: (name, t) → tensor-or-callable
-        self._store: Dict[Tuple[str, int], _StoredValue] = {}
+        self._store: dict[tuple[str, int], _StoredValue] = {}
         if data:
             for k, v in data.items():
                 self._store[k] = v
@@ -82,7 +68,7 @@ class ActivationCache:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _resolve(self, key: Tuple[str, int]) -> torch.Tensor:
+    def _resolve(self, key: tuple[str, int]) -> torch.Tensor:
         """Evaluate and memoise a lazy callable if necessary."""
         val = self._store[key]
         if callable(val):
@@ -92,10 +78,10 @@ class ActivationCache:
                     f"Lazy callable for key {key!r} did not return a torch.Tensor "
                     f"(got {type(val).__name__})."
                 )
-            self._store[key] = val   # memoise
+            self._store[key] = val  # memoise
         return val  # type: ignore[return-value]
 
-    def _timesteps_for(self, name: str) -> List[int]:
+    def _timesteps_for(self, name: str) -> list[int]:
         """Sorted list of timesteps stored for *name*."""
         return sorted(t for (n, t) in self._store if n == name)
 
@@ -110,11 +96,7 @@ class ActivationCache:
     # Core dunder methods
     # ------------------------------------------------------------------
 
-    def __setitem__(
-        self,
-        key: Union[str, Tuple[str, int]],
-        value: _StoredValue,
-    ) -> None:
+    def __setitem__(self, key: str | tuple[str, int], value: _StoredValue) -> None:
         """Store a tensor (or lazy callable) in the cache.
 
         Parameters
@@ -140,15 +122,10 @@ class ActivationCache:
             and isinstance(key[0], str)
             and isinstance(key[1], int)
         ):
-            raise KeyError(
-                f"Cache key must be (str, int) or str, got {key!r}."
-            )
+            raise KeyError(f"Cache key must be (str, int) or str, got {key!r}.")
         self._store[key] = value
 
-    def __getitem__(
-        self,
-        key: Union[str, Tuple[str, Union[int, slice, str]]],
-    ) -> torch.Tensor:
+    def __getitem__(self, key: str | tuple[str, int | slice | str]) -> torch.Tensor:
         """Retrieve one or more cached activations.
 
         Supported indexing patterns
@@ -194,8 +171,7 @@ class ActivationCache:
             selected = all_ts[idx]
             if not selected:
                 raise KeyError(
-                    f"Slice {idx} produced no timesteps for component {name!r}. "
-                    f"Available: {all_ts}"
+                    f"Slice {idx} produced no timesteps for component {name!r}. Available: {all_ts}"
                 )
             return self._stack_for(name, selected)
 
@@ -225,7 +201,7 @@ class ActivationCache:
     def __len__(self) -> int:
         return len(self._store)
 
-    def __iter__(self) -> Iterator[Tuple[str, int]]:
+    def __iter__(self) -> Iterator[tuple[str, int]]:
         return iter(self._store)
 
     def __repr__(self) -> str:
@@ -237,7 +213,7 @@ class ActivationCache:
     # Inspection
     # ------------------------------------------------------------------
 
-    def keys(self) -> List[Tuple[str, int]]:
+    def keys(self) -> list[tuple[str, int]]:
         """All ``(component_name, timestep)`` keys, sorted.
 
         Returns
@@ -247,7 +223,7 @@ class ActivationCache:
         return sorted(self._store.keys())
 
     @property
-    def component_names(self) -> List[str]:
+    def component_names(self) -> list[str]:
         """Unique component names, sorted alphabetically.
 
         Returns
@@ -257,7 +233,7 @@ class ActivationCache:
         return sorted({name for (name, _) in self._store})
 
     @property
-    def timesteps(self) -> List[int]:
+    def timesteps(self) -> list[int]:
         """Unique timestep indices across all components, sorted.
 
         Returns
@@ -271,11 +247,8 @@ class ActivationCache:
     # ------------------------------------------------------------------
 
     def get(
-        self,
-        name: str,
-        timestep: int,
-        default: Optional[torch.Tensor] = None,
-    ) -> Optional[torch.Tensor]:
+        self, name: str, timestep: int, default: torch.Tensor | None = None
+    ) -> torch.Tensor | None:
         """Return the activation at ``(name, timestep)`` or *default*.
 
         Parameters
@@ -300,7 +273,7 @@ class ActivationCache:
     # Device / gradient management
     # ------------------------------------------------------------------
 
-    def to_device(self, device: Union[str, torch.device]) -> "ActivationCache":
+    def to_device(self, device: str | torch.device) -> ActivationCache:
         """Return a new cache with all *evaluated* tensors moved to *device*.
 
         Lazy (callable) entries are forced before being moved.
@@ -315,12 +288,12 @@ class ActivationCache:
         ActivationCache
         """
         dev = torch.device(device)
-        new: Dict[Tuple[str, int], _StoredValue] = {}
+        new: dict[tuple[str, int], _StoredValue] = {}
         for k in self._store:
             new[k] = self._resolve(k).to(dev)
         return ActivationCache(new)
 
-    def detach(self) -> "ActivationCache":
+    def detach(self) -> ActivationCache:
         """Return a new cache with all tensors detached from the autograd graph.
 
         Lazy entries are forced before detaching.
@@ -329,7 +302,7 @@ class ActivationCache:
         -------
         ActivationCache
         """
-        new: Dict[Tuple[str, int], _StoredValue] = {}
+        new: dict[tuple[str, int], _StoredValue] = {}
         for k in self._store:
             new[k] = self._resolve(k).detach()
         return ActivationCache(new)
@@ -338,7 +311,7 @@ class ActivationCache:
     # Filtering
     # ------------------------------------------------------------------
 
-    def filter(self, names: Iterable[str]) -> "ActivationCache":
+    def filter(self, names: Iterable[str]) -> ActivationCache:
         """Return a new cache containing only the specified component names.
 
         Parameters
@@ -365,7 +338,7 @@ class ActivationCache:
     # Domain-specific helpers
     # ------------------------------------------------------------------
 
-    def surprise(self) -> Dict[int, torch.Tensor]:
+    def surprise(self) -> dict[int, torch.Tensor]:
         """Compute per-timestep KL divergence KL(z_posterior ‖ z_prior).
 
         Expects the cache to contain entries keyed ``"z_posterior"`` and
@@ -392,7 +365,7 @@ class ActivationCache:
         prior_ts = set(self._timesteps_for("z_prior"))
         shared = sorted(post_ts & prior_ts)
 
-        result: Dict[int, torch.Tensor] = {}
+        result: dict[int, torch.Tensor] = {}
         for t in shared:
             p = self._resolve(("z_posterior", t)).softmax(dim=-1).clamp(min=1e-8)
             q = self._resolve(("z_prior", t)).softmax(dim=-1).clamp(min=1e-8)
@@ -443,7 +416,7 @@ class ActivationCache:
             ) from e
 
         rows = []
-        for (name, t) in sorted(self._store.keys()):
+        for name, t in sorted(self._store.keys()):
             tensor = self._resolve((name, t))
             flat = tensor.detach().cpu().float()
             shape_str = str(tuple(flat.shape))

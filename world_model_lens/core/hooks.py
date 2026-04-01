@@ -1,7 +1,9 @@
 """Hook system for intercepting and modifying computations."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Any, Tuple
+from typing import Any
+
 import torch
 
 
@@ -20,7 +22,7 @@ class HookPoint:
     name: str
     fn: Callable[[torch.Tensor, "HookContext"], torch.Tensor]
     stage: str = "post"
-    timestep: Optional[int] = None
+    timestep: int | None = None
 
     def __post_init__(self):
         if self.stage not in ("pre", "post"):
@@ -40,8 +42,8 @@ class HookContext:
 
     timestep: int
     component: str
-    trajectory_so_far: List[Any] = field(default_factory=list)
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    trajectory_so_far: list[Any] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class HookRegistry:
@@ -52,8 +54,8 @@ class HookRegistry:
     """
 
     def __init__(self):
-        self._hooks: Dict[Tuple[str, Optional[int]], List[HookPoint]] = {}
-        self._global_hooks: Dict[str, List[HookPoint]] = {}
+        self._hooks: dict[tuple[str, int | None], list[HookPoint]] = {}
+        self._global_hooks: dict[str, list[HookPoint]] = {}
 
     def register(self, hook: HookPoint) -> None:
         """Register a hook.
@@ -75,7 +77,7 @@ class HookRegistry:
         self._hooks.clear()
         self._global_hooks.clear()
 
-    def get_hooks_for(self, component: str, timestep: Optional[int] = None) -> List[HookPoint]:
+    def get_hooks_for(self, component: str, timestep: int | None = None) -> list[HookPoint]:
         """Get all hooks matching a component and timestep.
 
         Args:
