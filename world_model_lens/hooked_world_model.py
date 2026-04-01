@@ -4,6 +4,7 @@ HookedWorldModel is backend-agnostic and works with ANY world model adapter.
 It provides interpretability tools without assuming RL-specific features.
 """
 
+import inspect
 from typing import Any, Dict, List, Optional, Tuple, Union, Callable, TYPE_CHECKING
 
 import torch
@@ -72,6 +73,55 @@ class HookedWorldModel:
         self._hooks = HookRegistry()
         self._device = torch.device("cpu")
 
+    def _get_capabilities(self) -> WorldModelCapabilities:
+        """Return adapter capabilities with a backward-compatible fallback.
+
+        Some older adapters in the repository implement the generic adapter
+        interface and do not expose a ``capabilities`` property. In that case
+        we synthesize a conservative descriptor from config flags.
+        """
+        caps = getattr(self.adapter, "capabilities", None)
+        if caps is not None:
+            return caps
+
+        config = getattr(self.adapter, "config", self.config)
+        return WorldModelCapabilities(
+            has_decoder=bool(getattr(config, "has_decoder", False)),
+            has_reward_head=bool(getattr(config, "has_reward_head", False)),
+            has_continue_head=bool(getattr(config, "has_done_head", False)),
+            has_actor=bool(getattr(config, "has_policy_head", False)),
+            has_critic=bool(getattr(config, "has_value_head", False)),
+            uses_actions=bool(getattr(config, "d_action", 0)),
+            is_rl_trained=bool(
+                getattr(config, "has_reward_head", False)
+                or getattr(config, "has_value_head", False)
+                or getattr(config, "has_policy_head", False)
+            ),
+        )
+
+    def _call_transition(
+        self,
+        state: torch.Tensor,
+        posterior: torch.Tensor,
+        action: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Call adapter.transition across the two adapter APIs in the repo."""
+        transition = self.adapter.transition
+        param_names = [
+            p.name
+            for p in inspect.signature(transition).parameters.values()
+            if p.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            )
+        ]
+
+        # Bound methods do not include ``self`` in the signature.
+        if len(param_names) >= 2 and param_names[1] in {"z", "latent", "posterior"}:
+            return transition(state, posterior, action)
+
+        return transition(state, action, posterior)
+
     @classmethod
     def from_checkpoint(
         cls,
@@ -133,7 +183,7 @@ class HookedWorldModel:
         cache = ActivationCache()
         states = []
 
-        caps = self.adapter.capabilities
+        caps = self._get_capabilities()
 
         init_result = self.adapter.initial_state(batch_size=1, device=observations.device)
         if isinstance(init_result, tuple):
@@ -186,10 +236,16 @@ class HookedWorldModel:
             value_pred = None
             if caps.has_critic:
                 try:
-                    value_pred = self.adapter.critic_forward(
-                        state.unsqueeze(0) if state.dim() == 1 else state,
-                        posterior.unsqueeze(0) if posterior.dim() == 1 else posterior,
-                    )
+                    if hasattr(self.adapter, "critic_forward"):
+                        value_pred = self.adapter.critic_forward(
+                            state.unsqueeze(0) if state.dim() == 1 else state,
+                            posterior.unsqueeze(0) if posterior.dim() == 1 else posterior,
+                        )
+                    else:
+                        value_pred = self.adapter.predict_value(
+                            state.unsqueeze(0) if state.dim() == 1 else state,
+                            action,
+                        )
                     if value_pred is not None:
                         cache["value", t] = value_pred.squeeze(0).detach()
                 except NotImplementedError:
@@ -206,10 +262,15 @@ class HookedWorldModel:
 
             if caps.has_decoder:
                 try:
-                    recon = self.adapter.decode(
-                        state.unsqueeze(0) if state.dim() == 1 else state,
-                        posterior.unsqueeze(0) if posterior.dim() == 1 else posterior,
-                    )
+                    try:
+                        recon = self.adapter.decode(
+                            state.unsqueeze(0) if state.dim() == 1 else state,
+                            posterior.unsqueeze(0) if posterior.dim() == 1 else posterior,
+                        )
+                    except TypeError:
+                        recon = self.adapter.decode(
+                            state.unsqueeze(0) if state.dim() == 1 else state,
+                        )
                     if recon is not None:
                         cache["reconstruction", t] = recon.squeeze(0).detach()
                 except NotImplementedError:
@@ -217,7 +278,7 @@ class HookedWorldModel:
 
             action_for_transition = action if caps.uses_actions else None
 
-            next_state = self.adapter.transition(
+            next_state = self._call_transition(
                 state.unsqueeze(0) if state.dim() == 1 else state,
                 posterior.unsqueeze(0) if posterior.dim() == 1 else posterior,
                 action_for_transition,
@@ -305,7 +366,7 @@ class HookedWorldModel:
         Returns:
             Imagined WorldTrajectory
         """
-        caps = self.adapter.capabilities
+        caps = self._get_capabilities()
         state = start_state.state.clone()
         z = start_state.obs_encoding if start_state.obs_encoding is not None else state
         states = [start_state]
@@ -323,7 +384,7 @@ class HookedWorldModel:
             else:
                 z = prior.squeeze(0) if prior.dim() == 1 else prior
 
-            state = self.adapter.transition(state, z, action)
+            state = self._call_transition(state, z, action)
 
             reward_pred = None
             if caps.has_reward_head and t > 0:
