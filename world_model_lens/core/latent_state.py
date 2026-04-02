@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Latent state representation for a single timestep."""
 
 from dataclasses import dataclass, field

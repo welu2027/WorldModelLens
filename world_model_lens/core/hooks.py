@@ -1,5 +1,7 @@
 """Hook system for intercepting and modifying computations."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,12 +19,18 @@ class HookPoint:
         stage: When to apply the hook ('pre', 'post'). 'post' fires after
                computation, before downstream use.
         timestep: Optional specific timestep to hook. None means all timesteps.
+        time_slice: Optional temporal range [start, end) for the hook.
+            If set, the hook only fires when start <= timestep < end.
+            This enables interventions at specific frames without affecting
+            other timesteps. Cannot be used together with timestep (if both
+            are set, timestep takes precedence).
     """
 
     name: str
     fn: Callable[[torch.Tensor, "HookContext"], torch.Tensor]
     stage: str = "post"
     timestep: int | None = None
+    time_slice: list[int] | None = None
 
     def __post_init__(self):
         if self.stage not in ("pre", "post"):
@@ -92,8 +100,18 @@ class HookRegistry:
         if timestep is not None:
             specific = self._hooks.get((component, timestep), [])
             hooks.extend(specific)
+            hooks = [h for h in hooks if self._matches_timestep(h, timestep)]
 
         return hooks
+
+    def _matches_timestep(self, hook: HookPoint, timestep: int) -> bool:
+        """Check if a hook matches the given timestep considering timestep and time_slice."""
+        if hook.timestep is not None:
+            return hook.timestep == timestep
+        if hook.time_slice is not None:
+            start, end = hook.time_slice
+            return start <= timestep < end
+        return True
 
     def apply(
         self,

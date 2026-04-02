@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Probing layer analyzer - analyze which layers encode which concepts."""
 
 from __future__ import annotations

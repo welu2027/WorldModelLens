@@ -49,6 +49,7 @@ HookFn = Callable[["torch.Tensor", "HookContext"], "torch.Tensor"]
 # HookContext
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class HookContext:
     """Runtime metadata supplied to every hook function.
@@ -90,6 +91,7 @@ class HookContext:
 # HookPoint
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class HookPoint:
     """A single registered hook: component + stage + callable.
@@ -118,6 +120,13 @@ class HookPoint:
         If ``None`` (default), the hook fires at every timestep.
         If an integer, the hook only fires when the current timestep
         equals this value.
+    time_slice:
+        Temporal range for the hook.  If ``None`` (default), the hook
+        fires at all timesteps.  If a tuple ``[start, end]``, the hook
+        only fires when ``start <= timestep < end``.  This enables
+        interventions at specific frames without affecting other timesteps.
+        Cannot be used together with ``timestep`` (if both are set, ``timestep``
+        takes precedence).
 
     Examples
     --------
@@ -126,6 +135,9 @@ class HookPoint:
     >>> hp = HookPoint(name="z_posterior", stage="post", fn=zero_out, timestep=5)
     >>> hp.timestep
     5
+    >>> hp_slice = HookPoint(name="encoder.out", stage="post", fn=zero_out, time_slice=[5, 10])
+    >>> hp_slice.time_slice
+    [5, 10]
     """
 
     name: str
@@ -139,6 +151,9 @@ class HookPoint:
 
     timestep: int | None = None
     """Specific timestep to fire on, or ``None`` for all timesteps."""
+
+    time_slice: list[int] | None = None
+    """Temporal range [start, end) for the hook, or ``None`` for all timesteps."""
 
     def matches(self, component: str, timestep: int) -> bool:
         """Return ``True`` if this hook should fire for *component* at *timestep*.
@@ -158,12 +173,17 @@ class HookPoint:
             return False
         if self.timestep is not None and self.timestep != timestep:
             return False
+        if self.time_slice is not None:
+            start, end = self.time_slice
+            if not (start <= timestep < end):
+                return False
         return True
 
 
 # ---------------------------------------------------------------------------
 # HookRegistry
 # ---------------------------------------------------------------------------
+
 
 class HookRegistry:
     """Mutable registry of :class:`HookPoint` objects.
@@ -204,9 +224,7 @@ class HookRegistry:
         >>> registry.register(HookPoint("encoder.out", "post", my_fn))
         """
         if not isinstance(hook, HookPoint):
-            raise TypeError(
-                f"register() expects a HookPoint, got {type(hook).__name__}."
-            )
+            raise TypeError(f"register() expects a HookPoint, got {type(hook).__name__}.")
         self._hooks.append(hook)
 
     def clear(self, name: str | None = None) -> None:

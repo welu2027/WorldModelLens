@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Hallucination detection for world model predictions.
 
 This module provides multiple methods to detect when world models produce

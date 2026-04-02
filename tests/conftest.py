@@ -3,14 +3,13 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import pytest
 import torch
 import torch.nn as nn
 
-from world_model_lens import WorldModelConfig
-from world_model_lens import HookedWorldModel
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from world_model_lens import HookedWorldModel, WorldModelConfig
 
 
 class SimpleTestAdapter(nn.Module):
@@ -29,19 +28,16 @@ class SimpleTestAdapter(nn.Module):
             nn.ReLU(),
             nn.Linear(config.d_h, config.d_h),
         )
-        self.capabilities = type(
-            "Caps",
-            (),
-            {
-                "has_reward_head": False,
-                "has_value_head": False,
-                "has_done_head": False,
-                "has_actor": False,
-                "has_decoder": False,
-                "has_critic": False,
-                "uses_actions": False,
-            },
-        )()
+        caps = {
+            "has_reward_head": False,
+            "has_value_head": False,
+            "has_done_head": False,
+            "has_actor": False,
+            "has_decoder": False,
+            "has_critic": False,
+            "uses_actions": False,
+        }
+        self.capabilities = type("Caps", (), caps)()
 
     def encode(self, obs, state=None):
         if obs.dim() == 1:
@@ -71,11 +67,7 @@ class SimpleTestAdapter(nn.Module):
 @pytest.fixture
 def tiny_cfg():
     """Small config for fast tests."""
-    return WorldModelConfig(
-        d_h=32,
-        d_action=4,
-        d_obs=64,
-    )
+    return WorldModelConfig(d_h=32, d_action=4, d_obs=64)
 
 
 @pytest.fixture

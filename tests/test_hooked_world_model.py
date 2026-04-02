@@ -1,8 +1,5 @@
 """Tests for HookedWorldModel."""
 
-import pytest
-import torch
-
 
 def test_run_with_cache_returns_correct_length(hooked_wm, fake_obs_seq, fake_action_seq):
     """Test run_with_cache returns trajectory of correct length."""
@@ -46,3 +43,38 @@ def test_add_and_clear_hooks(hooked_wm):
 
     hooked_wm.clear_hooks()
     assert len(hooked_wm._hooks) == 0
+
+
+def test_hook_time_slice_matching():
+    """Test that time_slice correctly filters hooks by timestep range."""
+    from world_model_lens import HookPoint, HookRegistry
+
+    def dummy_hook(tensor, ctx):
+        return tensor
+
+    registry = HookRegistry()
+    hook = HookPoint(name="encoder.out", stage="post", fn=dummy_hook, time_slice=[5, 10])
+    registry.register(hook)
+
+    assert len(registry.get_hooks_for("encoder.out", 0)) == 0
+    assert len(registry.get_hooks_for("encoder.out", 4)) == 0
+    assert len(registry.get_hooks_for("encoder.out", 5)) == 1
+    assert len(registry.get_hooks_for("encoder.out", 7)) == 1
+    assert len(registry.get_hooks_for("encoder.out", 9)) == 1
+    assert len(registry.get_hooks_for("encoder.out", 10)) == 0
+
+
+def test_hook_timestep_overrides_time_slice():
+    """Test that timestep takes precedence over time_slice when both set."""
+    from world_model_lens import HookPoint, HookRegistry
+
+    def dummy_hook(tensor, ctx):
+        return tensor
+
+    registry = HookRegistry()
+    hook = HookPoint(name="state", stage="post", fn=dummy_hook, timestep=3, time_slice=[5, 10])
+    registry.register(hook)
+
+    assert len(registry.get_hooks_for("state", 3)) == 1
+    assert len(registry.get_hooks_for("state", 5)) == 0
+    assert len(registry.get_hooks_for("state", 7)) == 0

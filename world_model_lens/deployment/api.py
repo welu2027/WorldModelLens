@@ -1,3 +1,4 @@
+from __future__ import annotations
 """FastAPI server for WorldModelLens analysis."""
 
 from __future__ import annotations
