@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Activation cache for storing and retrieving intermediate activations."""
 
 from collections.abc import Callable, Iterable

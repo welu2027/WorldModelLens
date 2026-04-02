@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Dimension patcher for per-dimension analysis."""
 
 from __future__ import annotations

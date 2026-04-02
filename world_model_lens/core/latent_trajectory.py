@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Latent trajectory representation for sequences of states."""
 
 from dataclasses import dataclass, field
