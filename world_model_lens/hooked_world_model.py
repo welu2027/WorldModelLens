@@ -4,7 +4,6 @@ HookedWorldModel is backend-agnostic and works with ANY world model adapter.
 It provides interpretability tools without assuming RL-specific features.
 """
 
-import inspect
 from typing import Any, Dict, List, Optional, Tuple, Union, Callable, TYPE_CHECKING
 
 import torch
@@ -72,6 +71,9 @@ class HookedWorldModel:
         self.name = name
         self._hooks = HookRegistry()
         self._device = torch.device("cpu")
+        self._uses_capabilities_adapter_api = isinstance(
+            getattr(type(self.adapter), "capabilities", None), property
+        )
 
     def _get_capabilities(self) -> WorldModelCapabilities:
         """Return adapter capabilities with a backward-compatible fallback.
@@ -88,6 +90,8 @@ class HookedWorldModel:
         return WorldModelCapabilities(
             has_decoder=bool(getattr(config, "has_decoder", False)),
             has_reward_head=bool(getattr(config, "has_reward_head", False)),
+            # Older configs often expose "done" semantics, while the newer
+            # capability descriptor tracks the corresponding continue head.
             has_continue_head=bool(getattr(config, "has_done_head", False)),
             has_actor=bool(getattr(config, "has_policy_head", False)),
             has_critic=bool(getattr(config, "has_value_head", False)),
@@ -107,20 +111,22 @@ class HookedWorldModel:
     ) -> torch.Tensor:
         """Call adapter.transition across the two adapter APIs in the repo."""
         transition = self.adapter.transition
-        param_names = [
-            p.name
-            for p in inspect.signature(transition).parameters.values()
-            if p.kind in (
-                inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD,
-            )
-        ]
-
-        # Bound methods do not include ``self`` in the signature.
-        if len(param_names) >= 2 and param_names[1] in {"z", "latent", "posterior"}:
+        if self._uses_capabilities_adapter_api:
             return transition(state, posterior, action)
 
         return transition(state, action, posterior)
+
+    def _call_decode(
+        self,
+        state: torch.Tensor,
+        posterior: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """Call adapter.decode across the decode signatures used in the repo."""
+        decode = self.adapter.decode
+        if self._uses_capabilities_adapter_api:
+            return decode(state, posterior)
+
+        return decode(state)
 
     @classmethod
     def from_checkpoint(
@@ -237,11 +243,16 @@ class HookedWorldModel:
             if caps.has_critic:
                 try:
                     if hasattr(self.adapter, "critic_forward"):
+                        # Newer base-adapter implementations expose
+                        # critic_forward(h, z), so we pass state/posterior.
                         value_pred = self.adapter.critic_forward(
                             state.unsqueeze(0) if state.dim() == 1 else state,
                             posterior.unsqueeze(0) if posterior.dim() == 1 else posterior,
                         )
                     else:
+                        # Legacy generic adapters expose predict_value(state, action),
+                        # so this fallback intentionally follows that older calling
+                        # convention rather than critic_forward's (h, z) API.
                         value_pred = self.adapter.predict_value(
                             state.unsqueeze(0) if state.dim() == 1 else state,
                             action,
@@ -262,15 +273,10 @@ class HookedWorldModel:
 
             if caps.has_decoder:
                 try:
-                    try:
-                        recon = self.adapter.decode(
-                            state.unsqueeze(0) if state.dim() == 1 else state,
-                            posterior.unsqueeze(0) if posterior.dim() == 1 else posterior,
-                        )
-                    except TypeError:
-                        recon = self.adapter.decode(
-                            state.unsqueeze(0) if state.dim() == 1 else state,
-                        )
+                    recon = self._call_decode(
+                        state.unsqueeze(0) if state.dim() == 1 else state,
+                        posterior.unsqueeze(0) if posterior.dim() == 1 else posterior,
+                    )
                     if recon is not None:
                         cache["reconstruction", t] = recon.squeeze(0).detach()
                 except NotImplementedError:
@@ -436,12 +442,10 @@ class HookedWorldModel:
         return self._hooks
 
     @property
-    def capabilities(self) -> "WorldModelCapabilities":
+    def capabilities(self) -> WorldModelCapabilities:
         """Access the adapter's capabilities descriptor.
 
         Returns:
             WorldModelCapabilities indicating which optional features are available.
         """
-        from world_model_lens.backends.base_adapter import WorldModelCapabilities
-
-        return self.adapter.capabilities
+        return self._get_capabilities()

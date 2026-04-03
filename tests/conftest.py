@@ -11,6 +11,7 @@ import torch.nn as nn
 
 from world_model_lens import WorldModelConfig
 from world_model_lens import HookedWorldModel
+from world_model_lens.backends.base_adapter import WorldModelCapabilities
 
 
 class SimpleTestAdapter(nn.Module):
@@ -29,19 +30,18 @@ class SimpleTestAdapter(nn.Module):
             nn.ReLU(),
             nn.Linear(config.d_h, config.d_h),
         )
-        self.capabilities = type(
-            "Caps",
-            (),
-            {
-                "has_reward_head": False,
-                "has_value_head": False,
-                "has_done_head": False,
-                "has_actor": False,
-                "has_decoder": False,
-                "has_critic": False,
-                "uses_actions": False,
-            },
-        )()
+        self._capabilities = WorldModelCapabilities(
+            has_reward_head=False,
+            has_continue_head=False,
+            has_actor=False,
+            has_decoder=False,
+            has_critic=False,
+            uses_actions=False,
+        )
+
+    @property
+    def capabilities(self):
+        return self._capabilities
 
     def encode(self, obs, state=None):
         if obs.dim() == 1:
