@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Counterfactual analysis for world model trajectories.
 
 This module provides tools for answering "what if" questions about world model

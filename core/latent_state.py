@@ -17,13 +17,11 @@ for that).
 
 from __future__ import annotations
 
-import copy
 import dataclasses
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Union
+from typing import Any
 
 import torch
-import torch.nn.functional as F
 
 
 @dataclass(eq=False)
@@ -93,25 +91,25 @@ class LatentState:
     # ------------------------------------------------------------------
     # Optional per-step quantities
     # ------------------------------------------------------------------
-    action: Optional[torch.Tensor] = None
+    action: torch.Tensor | None = None
     """Action tensor, shape ``()`` or ``(d_a,)``."""
 
-    reward_pred: Optional[float] = None
+    reward_pred: float | None = None
     """World-model-predicted reward."""
 
-    reward_real: Optional[float] = None
+    reward_real: float | None = None
     """Ground-truth environment reward."""
 
-    cont_pred: Optional[float] = None
+    cont_pred: float | None = None
     """Predicted continuation probability."""
 
-    value_pred: Optional[float] = None
+    value_pred: float | None = None
     """Critic value estimate."""
 
-    actor_logits: Optional[torch.Tensor] = None
+    actor_logits: torch.Tensor | None = None
     """Actor output logits, shape ``(d_a,)``."""
 
-    metadata: Optional[Dict[str, Any]] = field(default=None)
+    metadata: dict[str, Any] | None = field(default=None)
     """Arbitrary extra annotations."""
 
     # ------------------------------------------------------------------
@@ -205,7 +203,7 @@ class LatentState:
     # Methods
     # ------------------------------------------------------------------
 
-    def to_device(self, device: Union[str, torch.device]) -> "LatentState":
+    def to_device(self, device: str | torch.device) -> LatentState:
         """Return a copy of this state with all tensors moved to *device*.
 
         Parameters
@@ -228,7 +226,7 @@ class LatentState:
         """
         dev = torch.device(device)
 
-        def _move(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        def _move(t: torch.Tensor | None) -> torch.Tensor | None:
             return t.to(dev) if t is not None else None
 
         return dataclasses.replace(
@@ -240,7 +238,7 @@ class LatentState:
             actor_logits=_move(self.actor_logits),
         )
 
-    def detach(self) -> "LatentState":
+    def detach(self) -> LatentState:
         """Return a copy with all tensor gradients detached.
 
         Useful when checkpointing states during training to prevent
@@ -258,7 +256,7 @@ class LatentState:
         >>> s_no_grad.h_t.requires_grad
         False
         """
-        def _detach(t: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        def _detach(t: torch.Tensor | None) -> torch.Tensor | None:
             return t.detach() if t is not None else None
 
         return dataclasses.replace(

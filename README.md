@@ -5,7 +5,6 @@
 [![PyPI Version](https://img.shields.io/pypi/v/world-model-lens.svg)](https://pypi.org/project/world-model-lens/)
 [![Python Versions](https://img.shields.io/pypi/pyversions/world-model-lens.svg)](https://pypi.org/project/world-model-lens/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Tests](https://github.com/Bhavith-Chandra/WorldModelLens/workflows/CI/badge.svg)](https://github.com/Bhavith-Chandra/WorldModelLens/actions)
 [![Coverage](https://codecov.io/gh/Bhavith-Chandra/WorldModelLens/branch/main/graph/badge.svg)](https://codecov.io/gh/Bhavith-Chandra/WorldModelLens)
 
 World Model Lens provides **observability** and **replay** tooling for analyzing, debugging, and understanding world models through the lens of AI safety & interpretability research.
@@ -112,6 +111,19 @@ pip install world-model-lens
 git clone https://github.com/Bhavith-Chandra/WorldModelLens
 cd world_model_lens
 pip install -e ".[dev]"
+
+### Dev environment notes
+
+If you plan to run tests or examples that import PyTorch, install a CPU build of
+PyTorch in your virtual environment. Example:
+
+```bash
+python -m pip install --upgrade pip
+# CPU build
+pip install torch
+# or pin a version:
+pip install "torch==2.2.0"
+```
 ```
 
 ### Optional Dependencies

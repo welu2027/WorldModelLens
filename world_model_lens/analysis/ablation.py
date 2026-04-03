@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Ablation engine for systematic analysis of world model components.
 
 This module provides tools for:

@@ -3,8 +3,6 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
 import pytest
 import torch
 import torch.nn as nn
@@ -71,11 +69,7 @@ class SimpleTestAdapter(nn.Module):
 @pytest.fixture
 def tiny_cfg():
     """Small config for fast tests."""
-    return WorldModelConfig(
-        d_h=32,
-        d_action=4,
-        d_obs=64,
-    )
+    return WorldModelConfig(d_h=32, d_action=4, d_obs=64)
 
 
 @pytest.fixture

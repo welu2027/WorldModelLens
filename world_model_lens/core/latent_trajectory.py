@@ -1,7 +1,9 @@
+from __future__ import annotations
 """Latent trajectory representation for sequences of states."""
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
+
 import torch
 
 
@@ -18,12 +20,12 @@ class LatentTrajectory:
         metadata: Additional trajectory-level data.
     """
 
-    states: List[Any]
+    states: list[Any]
     env_name: str = "unknown"
-    episode_id: Optional[int] = None
+    episode_id: int | None = None
     imagined: bool = False
-    fork_point: Optional[int] = None
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    fork_point: int | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @property
     def length(self) -> int:
@@ -51,19 +53,19 @@ class LatentTrajectory:
         return torch.stack([s.kl for s in self.states], dim=0)
 
     @property
-    def rewards_pred(self) -> Optional[torch.Tensor]:
+    def rewards_pred(self) -> torch.Tensor | None:
         """Stacked predicted rewards [T, ...] if available."""
         vals = [s.reward_pred for s in self.states if s.reward_pred is not None]
         return torch.stack(vals, dim=0) if vals else None
 
     @property
-    def rewards_real(self) -> Optional[torch.Tensor]:
+    def rewards_real(self) -> torch.Tensor | None:
         """Stacked actual rewards [T, ...] if available."""
         vals = [s.reward_real for s in self.states if s.reward_real is not None]
         return torch.stack(vals, dim=0) if vals else None
 
     @property
-    def actions(self) -> Optional[torch.Tensor]:
+    def actions(self) -> torch.Tensor | None:
         """Stacked actions [T, d_action] if available."""
         vals = [s.action for s in self.states if s.action is not None]
         return torch.stack(vals, dim=0) if vals else None
@@ -71,7 +73,7 @@ class LatentTrajectory:
     def surprise_peaks(
         self,
         threshold: float,
-    ) -> List[Tuple[int, float]]:
+    ) -> list[tuple[int, float]]:
         """Find timesteps where KL exceeds threshold.
 
         Args:

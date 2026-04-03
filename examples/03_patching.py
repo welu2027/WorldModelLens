@@ -7,10 +7,10 @@ This example demonstrates:
 4. Full patching sweep
 """
 
-import torch
 import numpy as np
+import torch
 
-from world_model_lens import HookedWorldModel, WorldModelConfig, HookPoint, HookContext
+from world_model_lens import HookContext, HookedWorldModel, HookPoint, WorldModelConfig
 from world_model_lens.backends.dreamerv3 import DreamerV3Adapter
 from world_model_lens.patching.patcher import TemporalPatcher
 
@@ -22,7 +22,7 @@ def main():
 
     cfg = WorldModelConfig(d_h=128, n_cat=16, n_cls=16, d_action=4, d_obs=12288)
     adapter = DreamerV3Adapter(cfg)
-    wm = HookedWorldModel(adapter=adapter, cfg=cfg)
+    wm = HookedWorldModel(adapter=adapter, config=cfg)
 
     print("\n[1] Creating clean and corrupted runs...")
 
@@ -46,7 +46,7 @@ def main():
     components = ["h", "z_posterior", "z_prior"]
     timesteps = [5, 6, 7, 8, 9]
 
-    def reward_metric(pred):
+    def reward_metric(pred) -> float:
         return pred.mean().item() if pred is not None else 0.0
 
     sweep_result = patcher.full_sweep(
@@ -56,6 +56,8 @@ def main():
         metric_fn=reward_metric,
         t_range=timesteps,
         parallel=False,
+        clean_obs_seq=obs_seq,
+        clean_action_seq=action_seq,
     )
 
     print("\n[3] Top patches by recovery rate:")

@@ -4,7 +4,7 @@ HookedWorldModel is backend-agnostic and works with ANY world model adapter.
 It provides interpretability tools without assuming RL-specific features.
 """
 
-from typing import Any, Dict, List, Optional, Tuple, Union, Callable, TYPE_CHECKING
+from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING, Union
 
 import torch
 
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from world_model_lens.core.world_trajectory import WorldTrajectory
     from world_model_lens.core.config import WorldModelConfig
 
-from world_model_lens.core.hooks import HookPoint, HookContext, HookRegistry
+from world_model_lens.core.hooks import HookContext, HookPoint, HookRegistry
 from world_model_lens.core.activation_cache import ActivationCache
 from world_model_lens.core.world_state import WorldState
 from world_model_lens.core.world_trajectory import WorldTrajectory
@@ -208,10 +208,16 @@ class HookedWorldModel:
             if actions is not None and t < len(actions):
                 action = actions[t]
 
+            hook_ctx = HookContext(timestep=t, component="state", trajectory_so_far=states)
+            state = self._hooks.apply("state", t, state, hook_ctx)
+
             posterior, obs_encoding = self.adapter.encode(
                 obs.unsqueeze(0), state.unsqueeze(0) if state.dim() == 1 else state
             )
             posterior = posterior.squeeze(0)
+
+            hook_ctx_z = HookContext(timestep=t, component="z_posterior", trajectory_so_far=states)
+            posterior = self._hooks.apply("z_posterior", t, posterior, hook_ctx_z)
 
             obs_encoding = obs_encoding.squeeze(0) if obs_encoding is not None else None
 
@@ -283,6 +289,12 @@ class HookedWorldModel:
                     pass
 
             action_for_transition = action if caps.uses_actions else None
+            if action_for_transition is not None:
+                hook_ctx_a = HookContext(timestep=t, component="action", trajectory_so_far=states)
+                action_for_transition = self._hooks.apply(
+                    "action", t, action_for_transition, hook_ctx_a
+                )
+                action = action_for_transition
 
             next_state = self._call_transition(
                 state.unsqueeze(0) if state.dim() == 1 else state,
@@ -320,7 +332,7 @@ class HookedWorldModel:
         self,
         observations: torch.Tensor,
         actions: Optional[torch.Tensor] = None,
-        fwd_hooks: Optional[List[HookPoint]] = None,
+        fwd_hooks: Optional[Union[List[HookPoint], Tuple[HookPoint, ...]]] = None,
         return_cache: bool = False,
     ) -> Union[WorldTrajectory, Tuple[WorldTrajectory, ActivationCache]]:
         """Run forward pass with temporary hooks.

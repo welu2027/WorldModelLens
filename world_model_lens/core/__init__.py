@@ -38,6 +38,7 @@ from world_model_lens.core.hooks import HookPoint, HookContext, HookRegistry
 from world_model_lens.core.activation_cache import ActivationCache
 from world_model_lens.core.cache_query import CacheQuery
 from world_model_lens.core.latent_trajectory import LatentTrajectory
+from world_model_lens.core.latent_state import LatentState
 from world_model_lens.core.lazy_trajectory import (
     LatentTrajectoryLite,
     TensorStore,
@@ -64,6 +65,7 @@ __all__ = [
     "HookRegistry",
     "ActivationCache",
     "LatentTrajectory",
+    "LatentState",
     "LatentTrajectoryLite",
     "TensorStore",
     "TrajectoryDataset",
