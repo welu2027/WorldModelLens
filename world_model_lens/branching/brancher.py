@@ -5,15 +5,15 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 import pandas as pd
 
-from world_model_lens import HookedWorldModel, WorldTrajectory, WorldState
+from world_model_lens import HookedWorldModel, LatentTrajectory, LatentState
 
 
 @dataclass
 class BranchCollection:
     """Collection of imagined branches from a fork point."""
 
-    branches: List[WorldTrajectory]
-    reference: WorldTrajectory
+    branches: List[LatentTrajectory]
+    reference: LatentTrajectory
     fork_point: int
 
     def compare_reward_predictions(self) -> "pd.DataFrame":
@@ -22,13 +22,12 @@ class BranchCollection:
 
         data = []
         for i, branch in enumerate(self.branches):
-            rewards = branch.reward_sequence
-            if rewards is not None:
+            if branch.rewards_pred is not None:
                 data.append(
                     {
                         "branch": i,
-                        "mean_reward": rewards.mean().item(),
-                        "std_reward": rewards.std().item(),
+                        "mean_reward": branch.rewards_pred.mean().item(),
+                        "std_reward": branch.rewards_pred.std().item(),
                     }
                 )
         return pd.DataFrame(data)
@@ -40,7 +39,7 @@ class BranchCollection:
 
         divergences = []
         for t in range(min(len(b) for b in self.branches)):
-            h_values = torch.stack([b.states[t].state for b in self.branches])
+            h_values = torch.stack([b.states[t].h_t for b in self.branches])
             if metric == "cosine":
                 mean_h = h_values.mean(dim=0)
                 cos_sim = torch.nn.functional.cosine_similarity(
@@ -61,9 +60,8 @@ class BranchCollection:
         best_score = float("-inf")
 
         for i, branch in enumerate(self.branches):
-            rewards = branch.reward_sequence
-            if metric == "total_reward" and rewards is not None:
-                score = rewards.sum().item()
+            if metric == "total_reward" and branch.rewards_pred is not None:
+                score = branch.rewards_pred.sum().item()
             else:
                 score = 0.0
 
@@ -107,7 +105,7 @@ class BehaviorComparison:
 class UncertaintyResult:
     """Result of ensemble imagination."""
 
-    trajectories: List[WorldTrajectory]
+    trajectories: List[LatentTrajectory]
     mean_latent: torch.Tensor
     epistemic_uncertainty: torch.Tensor
     reward_uncertainty: torch.Tensor
@@ -125,7 +123,7 @@ class ImaginationBrancher:
 
     def fork(
         self,
-        real_traj: WorldTrajectory,
+        real_traj: LatentTrajectory,
         fork_at: int,
         action_sequences: List[torch.Tensor],
         horizon: int = 20,
@@ -151,6 +149,7 @@ class ImaginationBrancher:
                 horizon=horizon,
             )
             imagined.fork_point = fork_at
+            imagined.imagined = True
             branches.append(imagined)
 
         return BranchCollection(
@@ -161,15 +160,15 @@ class ImaginationBrancher:
 
     def belief_manipulation_fork(
         self,
-        real_traj: WorldTrajectory,
+        real_traj: LatentTrajectory,
         fork_at: int,
         z_patch_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         h_patch_fn: Optional[Callable[[torch.Tensor], torch.Tensor]] = None,
         z_replacement: Optional[torch.Tensor] = None,
         policy: Optional[Callable] = None,
-        actions: Optional[torch.Tensor] = None,
+        action_sequence: Optional[torch.Tensor] = None,
         horizon: int = 30,
-    ) -> Tuple[WorldTrajectory, WorldTrajectory]:
+    ) -> Tuple[LatentTrajectory, LatentTrajectory]:
         """Fork with belief manipulation.
 
         Args:
@@ -179,7 +178,7 @@ class ImaginationBrancher:
             h_patch_fn: Function to transform h.
             z_replacement: Direct replacement for z.
             policy: Policy for imagination.
-            actions: Fixed actions.
+            action_sequence: Fixed actions.
             horizon: Imagination horizon.
 
         Returns:
@@ -189,28 +188,30 @@ class ImaginationBrancher:
 
         original = self.wm.imagine(
             start_state=start_state,
-            actions=actions,
+            actions=action_sequence,
             horizon=horizon,
         )
         original.fork_point = fork_at
+        original.imagined = True
 
         manipulated_state = start_state
         if z_replacement is not None:
-            manipulated_state.obs_encoding = z_replacement.clone()
+            manipulated_state.z_posterior = z_replacement.clone()
 
         manipulated = self.wm.imagine(
             start_state=manipulated_state,
-            actions=actions,
+            actions=action_sequence,
             horizon=horizon,
         )
         manipulated.fork_point = fork_at
+        manipulated.imagined = True
 
         return original, manipulated
 
     def compare_behavior(
         self,
-        traj_a: WorldTrajectory,
-        traj_b: WorldTrajectory,
+        traj_a: LatentTrajectory,
+        traj_b: LatentTrajectory,
         timestep_range: Optional[Tuple[int, int]] = None,
     ) -> BehaviorComparison:
         """Compare behavior between two trajectories.
@@ -259,7 +260,7 @@ class ImaginationBrancher:
 
     def ensemble_branch(
         self,
-        start_state: WorldState,
+        start_state: LatentState,
         policy: Optional[Callable] = None,
         horizon: int = 20,
         n_samples: int = 50,
@@ -285,17 +286,17 @@ class ImaginationBrancher:
                 horizon=horizon,
                 temperature=temperature,
             )
+            traj.imagined = True
             trajectories.append(traj)
 
-        all_h = torch.stack([t.state_sequence for t in trajectories], dim=0)
+        all_h = torch.stack([t.h_sequence for t in trajectories], dim=0)
         mean_h = all_h.mean(dim=0)
         epistemic = all_h.std(dim=0)
 
         reward_unc = torch.zeros(horizon)
         for traj in trajectories:
-            rewards = traj.reward_sequence
-            if rewards is not None:
-                reward_unc += rewards.std(dim=0)
+            if traj.rewards_pred is not None:
+                reward_unc += traj.rewards_pred.std(dim=0)
         reward_unc = reward_unc / n_samples
 
         return UncertaintyResult(
