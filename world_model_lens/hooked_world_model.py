@@ -71,6 +71,62 @@ class HookedWorldModel:
         self.name = name
         self._hooks = HookRegistry()
         self._device = torch.device("cpu")
+        self._uses_capabilities_adapter_api = isinstance(
+            getattr(type(self.adapter), "capabilities", None), property
+        )
+
+    def _get_capabilities(self) -> WorldModelCapabilities:
+        """Return adapter capabilities with a backward-compatible fallback.
+
+        Some older adapters in the repository implement the generic adapter
+        interface and do not expose a ``capabilities`` property. In that case
+        we synthesize a conservative descriptor from config flags.
+        """
+        caps = getattr(self.adapter, "capabilities", None)
+        if caps is not None:
+            return caps
+
+        config = getattr(self.adapter, "config", self.config)
+        return WorldModelCapabilities(
+            has_decoder=bool(getattr(config, "has_decoder", False)),
+            has_reward_head=bool(getattr(config, "has_reward_head", False)),
+            # Older configs often expose "done" semantics, while the newer
+            # capability descriptor tracks the corresponding continue head.
+            has_continue_head=bool(getattr(config, "has_done_head", False)),
+            has_actor=bool(getattr(config, "has_policy_head", False)),
+            has_critic=bool(getattr(config, "has_value_head", False)),
+            uses_actions=bool(getattr(config, "d_action", 0)),
+            is_rl_trained=bool(
+                getattr(config, "has_reward_head", False)
+                or getattr(config, "has_value_head", False)
+                or getattr(config, "has_policy_head", False)
+            ),
+        )
+
+    def _call_transition(
+        self,
+        state: torch.Tensor,
+        posterior: torch.Tensor,
+        action: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Call adapter.transition across the two adapter APIs in the repo."""
+        transition = self.adapter.transition
+        if self._uses_capabilities_adapter_api:
+            return transition(state, posterior, action)
+
+        return transition(state, action, posterior)
+
+    def _call_decode(
+        self,
+        state: torch.Tensor,
+        posterior: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        """Call adapter.decode across the decode signatures used in the repo."""
+        decode = self.adapter.decode
+        if self._uses_capabilities_adapter_api:
+            return decode(state, posterior)
+
+        return decode(state)
 
     @classmethod
     def from_checkpoint(
@@ -133,7 +189,7 @@ class HookedWorldModel:
         cache = ActivationCache()
         states = []
 
-        caps = self.adapter.capabilities
+        caps = self._get_capabilities()
 
         init_result = self.adapter.initial_state(batch_size=1, device=observations.device)
         if isinstance(init_result, tuple):
@@ -192,10 +248,21 @@ class HookedWorldModel:
             value_pred = None
             if caps.has_critic:
                 try:
-                    value_pred = self.adapter.critic_forward(
-                        state.unsqueeze(0) if state.dim() == 1 else state,
-                        posterior.unsqueeze(0) if posterior.dim() == 1 else posterior,
-                    )
+                    if hasattr(self.adapter, "critic_forward"):
+                        # Newer base-adapter implementations expose
+                        # critic_forward(h, z), so we pass state/posterior.
+                        value_pred = self.adapter.critic_forward(
+                            state.unsqueeze(0) if state.dim() == 1 else state,
+                            posterior.unsqueeze(0) if posterior.dim() == 1 else posterior,
+                        )
+                    else:
+                        # Legacy generic adapters expose predict_value(state, action),
+                        # so this fallback intentionally follows that older calling
+                        # convention rather than critic_forward's (h, z) API.
+                        value_pred = self.adapter.predict_value(
+                            state.unsqueeze(0) if state.dim() == 1 else state,
+                            action,
+                        )
                     if value_pred is not None:
                         cache["value", t] = value_pred.squeeze(0).detach()
                 except NotImplementedError:
@@ -212,7 +279,7 @@ class HookedWorldModel:
 
             if caps.has_decoder:
                 try:
-                    recon = self.adapter.decode(
+                    recon = self._call_decode(
                         state.unsqueeze(0) if state.dim() == 1 else state,
                         posterior.unsqueeze(0) if posterior.dim() == 1 else posterior,
                     )
@@ -229,7 +296,7 @@ class HookedWorldModel:
                 )
                 action = action_for_transition
 
-            next_state = self.adapter.transition(
+            next_state = self._call_transition(
                 state.unsqueeze(0) if state.dim() == 1 else state,
                 posterior.unsqueeze(0) if posterior.dim() == 1 else posterior,
                 action_for_transition,
@@ -317,7 +384,7 @@ class HookedWorldModel:
         Returns:
             Imagined WorldTrajectory
         """
-        caps = self.adapter.capabilities
+        caps = self._get_capabilities()
         state = start_state.state.clone()
         z = start_state.obs_encoding if start_state.obs_encoding is not None else state
         states = [start_state]
@@ -335,7 +402,7 @@ class HookedWorldModel:
             else:
                 z = prior.squeeze(0) if prior.dim() == 1 else prior
 
-            state = self.adapter.transition(state, z, action)
+            state = self._call_transition(state, z, action)
 
             reward_pred = None
             if caps.has_reward_head and t > 0:
@@ -387,12 +454,10 @@ class HookedWorldModel:
         return self._hooks
 
     @property
-    def capabilities(self) -> "WorldModelCapabilities":
+    def capabilities(self) -> WorldModelCapabilities:
         """Access the adapter's capabilities descriptor.
 
         Returns:
             WorldModelCapabilities indicating which optional features are available.
         """
-        from world_model_lens.backends.base_adapter import WorldModelCapabilities
-
-        return self.adapter.capabilities
+        return self._get_capabilities()
