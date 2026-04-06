@@ -427,8 +427,10 @@ class CounterfactualEngine:
         if metric == "reward_pred":
             rewards = []
             for s in trajectory.states:
-                r = s.reward if getattr(s, "reward", None) is not None else getattr(
-                    s, "reward_pred", None
+                r = (
+                    s.reward
+                    if getattr(s, "reward", None) is not None
+                    else getattr(s, "reward_pred", None)
                 )
                 if r is None and hasattr(s, "predictions") and s.predictions:
                     r = s.predictions.get("reward")

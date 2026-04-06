@@ -1,4 +1,4 @@
-# WorldModelLens Glossary
+﻿# WorldModelLens Glossary
 
 Terminology for mechanistic interpretability of world models.
 
@@ -24,7 +24,7 @@ wm.add_hook(hook)
 ```
 
 ### Latent State
-The internal representation produced by a world model's encoder. For discrete latents, this is a categorical distribution over `n_cat` classes. For continuous latents, this is a vector in latent space.
+The internal representation produced by a world model's encoder. For discrete latents, this is typically represented as `n_cat` categorical variables with `n_cls` classes each. For continuous latents, this is a vector in latent space.
 
 ### World Model
 A model that learns a predictive representation of environment dynamics. Unlike policy/value networks, world models predict: `z_t+1 = f(z_t, a_t)` and optionally reconstruct observations.
@@ -40,7 +40,12 @@ A linear model trained to decode a target property (e.g., position, reward) from
 **Example:**
 ```python
 prober = LatentProber(seed=42)
-result = prober.train_probe(latents, labels, concept_name="position")
+result = prober.train_probe(
+    latents,
+    labels,
+    concept_name="position",
+    activation_name="z_posterior",
+)
 print(f"Accuracy: {result.accuracy}")
 ```
 
@@ -49,7 +54,15 @@ A causal intervention technique where activations at one location are replaced w
 
 **Example:**
 ```python
-result = patcher.patch_state(clean_cache, corrupt_cache, "h", 10, metric_fn)
+result = patcher.patch_state(
+    clean_cache,
+    corrupt_cache,
+    patch_component="h",
+    patch_at_timestep=10,
+    metric_fn=metric_fn,
+    clean_obs_seq=clean_obs_seq,
+    clean_action_seq=clean_action_seq,
+)
 print(f"Recovery: {result.recovery_rate}")
 ```
 
