@@ -1,16 +1,18 @@
 """Multimodal analysis and concept discovery for world models."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
-import torch
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
+import torch
 from sklearn.cluster import KMeans
 from sklearn.metrics import mutual_info_score
 
 from world_model_lens.core.activation_cache import ActivationCache
 
 if TYPE_CHECKING:
-    from world_model_lens import HookedWorldModel
+    pass
 
 
 @dataclass
@@ -27,7 +29,7 @@ class Concept:
     direction: torch.Tensor
     name: str
     interpretability_score: float
-    channel: Optional[str] = None
+    channel: str | None = None
 
     def similarity(self, other: "Concept") -> float:
         """Compute cosine similarity with another concept."""
@@ -45,14 +47,14 @@ class MultimodalProbeResult:
     labels: torch.Tensor
     predictions: torch.Tensor
     accuracy: float
-    per_channel_accuracy: Dict[str, float]
+    per_channel_accuracy: dict[str, float]
 
 
 @dataclass
 class ConceptDiscoveryResult:
     """Result of automated concept discovery."""
 
-    concepts: List[Concept]
+    concepts: list[Concept]
     cluster_assignments: torch.Tensor
     mutual_info_matrix: torch.Tensor
     n_clusters: int
@@ -61,8 +63,8 @@ class ConceptDiscoveryResult:
 def probe_multimodal(
     cache: ActivationCache,
     labels: torch.Tensor,
-    channel_names: List[str],
-    probe_fn: Optional[Callable] = None,
+    channel_names: list[str],
+    probe_fn: Callable | None = None,
 ) -> MultimodalProbeResult:
     """Probe each multimodal channel separately.
 
@@ -122,7 +124,7 @@ def auto_discover_concepts(
     cache: ActivationCache,
     n_concepts: int = 64,
     component: str = "z_posterior",
-) -> List[Concept]:
+) -> list[Concept]:
     """Automatically discover concepts in latents using MI clustering.
 
     Args:
@@ -197,7 +199,7 @@ def compute_mutual_information(
 
 
 def concept_alignment_score(
-    concepts: List[Concept],
+    concepts: list[Concept],
     probe_directions: torch.Tensor,
 ) -> torch.Tensor:
     """Compute alignment between discovered concepts and probe directions.
@@ -226,10 +228,10 @@ def concept_alignment_score(
 
 
 def find_concept_by_name(
-    concepts: List[Concept],
+    concepts: list[Concept],
     name: str,
     threshold: float = 0.5,
-) -> Optional[Concept]:
+) -> Concept | None:
     """Find a concept by name with fuzzy matching.
 
     Args:
@@ -251,9 +253,9 @@ def find_concept_by_name(
 
 
 def merge_similar_concepts(
-    concepts: List[Concept],
+    concepts: list[Concept],
     similarity_threshold: float = 0.9,
-) -> List[Concept]:
+) -> list[Concept]:
     """Merge highly similar concepts.
 
     Args:
@@ -292,7 +294,7 @@ class MultimodalCache:
 
     def __init__(self):
         self.cache = ActivationCache()
-        self._channel_metadata: Dict[str, Dict[str, Any]] = {}
+        self._channel_metadata: dict[str, dict[str, Any]] = {}
 
     def add_channel(
         self,
@@ -300,7 +302,7 @@ class MultimodalCache:
         component: str,
         timestep: int,
         tensor: torch.Tensor,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Add a multimodal channel activation.
 
@@ -318,7 +320,7 @@ class MultimodalCache:
             self._channel_metadata[channel_name] = {}
         self._channel_metadata[channel_name][component] = metadata or {}
 
-    def get_channel(self, channel_name: str) -> Dict[str, List[torch.Tensor]]:
+    def get_channel(self, channel_name: str) -> dict[str, list[torch.Tensor]]:
         """Get all activations for a specific channel.
 
         Args:
@@ -328,7 +330,7 @@ class MultimodalCache:
             Dict mapping component -> list of tensors.
         """
         result = {}
-        for (name, t), val in self.cache.keys():
+        for (name, t), _val in self.cache.keys():
             if name.startswith(f"{channel_name}_"):
                 component = name[len(f"{channel_name}_") :]
                 if component not in result:
@@ -337,7 +339,7 @@ class MultimodalCache:
 
         return result
 
-    def channel_names(self) -> List[str]:
+    def channel_names(self) -> list[str]:
         """List all available channel names."""
         return list(self._channel_metadata.keys())
 
@@ -354,11 +356,11 @@ class MultimodalCache:
         return self.cache.keys()
 
     @property
-    def component_names(self) -> List[str]:
+    def component_names(self) -> list[str]:
         return self.cache.component_names
 
     @property
-    def timesteps(self) -> List[int]:
+    def timesteps(self) -> list[int]:
         return self.cache.timesteps
 
     def materialize(self, **kwargs):

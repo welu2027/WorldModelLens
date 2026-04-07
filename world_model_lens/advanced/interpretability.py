@@ -9,19 +9,19 @@ Includes:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union, TYPE_CHECKING
-import numpy as np
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from tqdm import tqdm
+import torch.nn.functional as functional
 
 if TYPE_CHECKING:
     from world_model_lens import HookedWorldModel
     from world_model_lens.core import ActivationCache, WorldTrajectory
-    from world_model_lens.sae.sae import SparseAutoencoder as SAE
     from world_model_lens.probing.prober import ProbeResult
+    from world_model_lens.sae.sae import SparseAutoencoder as Sae
 
 
 @dataclass
@@ -30,7 +30,7 @@ class LogitLensResult:
 
     reward_logits: torch.Tensor
     action_logits: torch.Tensor
-    top_tokens: Dict[str, List[int]]
+    top_tokens: dict[str, list[int]]
     projection_matrix: torch.Tensor
     component: str
     timestep: int
@@ -48,9 +48,9 @@ class LogitLens:
         print(f"Top reward tokens: {result.top_tokens['reward']}")
     """
 
-    def __init__(self, wm: "HookedWorldModel"):
+    def __init__(self, wm: HookedWorldModel):
         self.wm = wm
-        self._projection_matrices: Dict[str, nn.Linear] = {}
+        self._projection_matrices: dict[str, nn.Linear] = {}
 
     def _get_projection_matrix(self, target: str) -> nn.Linear:
         """Get or create projection matrix to target space."""
@@ -71,7 +71,7 @@ class LogitLens:
 
     def project_to_logits(
         self,
-        cache: "ActivationCache",
+        cache: ActivationCache,
         component: str = "h",
         timestep: int = 0,
     ) -> LogitLensResult:
@@ -115,10 +115,10 @@ class LogitLens:
 
     def sweep(
         self,
-        cache: "ActivationCache",
-        components: Optional[List[str]] = None,
-        timesteps: Optional[List[int]] = None,
-    ) -> Dict[Tuple[str, int], LogitLensResult]:
+        cache: ActivationCache,
+        components: list[str] | None = None,
+        timesteps: list[int] | None = None,
+    ) -> dict[tuple[str, int], LogitLensResult]:
         """Run logit lens across components and timesteps."""
         components = components or cache.component_names
         timesteps = timesteps or cache.timesteps
@@ -152,13 +152,13 @@ class PathPatcher:
     Traces causal paths between components at different timesteps.
     """
 
-    def __init__(self, wm: "HookedWorldModel"):
+    def __init__(self, wm: HookedWorldModel):
         self.wm = wm
 
     def patch_path(
         self,
-        cache_clean: "ActivationCache",
-        cache_corrupt: "ActivationCache",
+        cache_clean: ActivationCache,
+        cache_corrupt: ActivationCache,
         source_comp: str,
         source_t: int,
         target_comp: str,
@@ -230,11 +230,11 @@ class PathPatcher:
 
     def find_causal_paths(
         self,
-        cache_clean: "ActivationCache",
-        cache_corrupt: "ActivationCache",
+        cache_clean: ActivationCache,
+        cache_corrupt: ActivationCache,
         metric_fn: Callable[[torch.Tensor], float],
         max_length: int = 3,
-    ) -> List[PathPatchingResult]:
+    ) -> list[PathPatchingResult]:
         """Find causal paths up to max_length."""
         components = cache_clean.component_names
         timesteps = cache_clean.timesteps
@@ -269,8 +269,8 @@ class PathPatcher:
 class SAECircuitResult:
     """Result from SAE circuit discovery."""
 
-    feature_graph: Dict[int, Set[int]]
-    causal_edges: List[Tuple[int, int, float]]
+    feature_graph: dict[int, set[int]]
+    causal_edges: list[tuple[int, int, float]]
     feature_activations: torch.Tensor
 
 
@@ -280,7 +280,7 @@ class SAECircuitDiscovery:
     Builds feature coactivation graphs and tests causal links via patching.
     """
 
-    def __init__(self, sae: "SAE", wm: "HookedWorldModel"):
+    def __init__(self, sae: Sae, wm: HookedWorldModel):
         self.sae = sae
         self.wm = wm
 
@@ -297,7 +297,7 @@ class SAECircuitDiscovery:
         self,
         activations: torch.Tensor,
         threshold: float = 0.5,
-    ) -> Dict[int, Set[int]]:
+    ) -> dict[int, set[int]]:
         """Build graph of coactivating features.
 
         Args:
@@ -323,10 +323,10 @@ class SAECircuitDiscovery:
 
     def test_causal_links(
         self,
-        source_features: List[int],
-        target_features: List[int],
-        cache: "ActivationCache",
-    ) -> List[Tuple[int, int, float]]:
+        source_features: list[int],
+        target_features: list[int],
+        cache: ActivationCache,
+    ) -> list[tuple[int, int, float]]:
         """Test causal links between features via patching."""
         from world_model_lens.patching import TemporalPatcher
 
@@ -352,7 +352,7 @@ class SAECircuitDiscovery:
     def discover_circuits(
         self,
         latents: torch.Tensor,
-        cache: "ActivationCache",
+        cache: ActivationCache,
     ) -> SAECircuitResult:
         """Full circuit discovery pipeline."""
         activations = self.compute_activations(latents)
@@ -378,12 +378,12 @@ class LongHorizonAnalyzer:
     Detects planning horizon, belief drift, and overcommitment.
     """
 
-    def __init__(self, wm: "HookedWorldModel"):
+    def __init__(self, wm: HookedWorldModel):
         self.wm = wm
 
     def detect_planning_horizon(
         self,
-        trajectory: "WorldTrajectory",
+        trajectory: WorldTrajectory,
         horizon: int = 100,
     ) -> int:
         """Detect timesteps where future predictions lose fidelity.
@@ -421,8 +421,8 @@ class LongHorizonAnalyzer:
 
     def compute_belief_drift(
         self,
-        imagined_trajectory: "WorldTrajectory",
-        real_trajectory: Optional["WorldTrajectory"] = None,
+        imagined_trajectory: WorldTrajectory,
+        real_trajectory: WorldTrajectory | None = None,
     ) -> torch.Tensor:
         """Compute KL divergence accumulating over imagination.
 
@@ -442,8 +442,8 @@ class LongHorizonAnalyzer:
                 min_len = min(h_imagined.shape[0], h_real.shape[0])
 
                 dist = torch.nn.functional.kl_div(
-                    F.log_softmax(h_imagined[:min_len], dim=-1),
-                    F.softmax(h_real[:min_len], dim=-1),
+                    functional.log_softmax(h_imagined[:min_len], dim=-1),
+                    functional.softmax(h_real[:min_len], dim=-1),
                     reduction="none",
                 )
                 return dist.sum(dim=-1)
@@ -453,9 +453,9 @@ class LongHorizonAnalyzer:
 
     def detect_overcommitment(
         self,
-        trajectory: "WorldTrajectory",
+        trajectory: WorldTrajectory,
         threshold: float = 0.1,
-    ) -> List[int]:
+    ) -> list[int]:
         """Detect timesteps where value predictions don't update after surprise.
 
         Args:
@@ -482,9 +482,9 @@ class LongHorizonAnalyzer:
 
     def full_analysis(
         self,
-        trajectory: "WorldTrajectory",
+        trajectory: WorldTrajectory,
         horizon: int = 50,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Run complete long-horizon analysis."""
         start_state = trajectory.states[0]
         actions = trajectory.actions
@@ -505,12 +505,12 @@ class LongHorizonAnalyzer:
 
 
 def cross_model_probe_transfer(
-    probe: "ProbeResult",
-    source_model: "HookedWorldModel",
-    target_models: List["HookedWorldModel"],
-    cache_source: "ActivationCache",
-    caches_target: List["ActivationCache"],
-) -> Dict[str, float]:
+    probe: ProbeResult,
+    source_model: HookedWorldModel,
+    target_models: list[HookedWorldModel],
+    cache_source: ActivationCache,
+    caches_target: list[ActivationCache],
+) -> dict[str, float]:
     """Test if probes/circuits transfer across models.
 
     Args:
@@ -528,7 +528,7 @@ def cross_model_probe_transfer(
     prober = LatentProber(seed=42)
     results = {}
 
-    for target_model, target_cache in zip(target_models, caches_target):
+    for target_model, target_cache in zip(target_models, caches_target, strict=True):
         model_name = target_model.name
 
         try:

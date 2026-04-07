@@ -7,10 +7,12 @@ This module provides attribution methods adapted for time-series predictions:
 - Causal tracing through time
 """
 
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-import torch
-import numpy as np
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+import torch
 
 
 @dataclass
@@ -18,11 +20,11 @@ class AttributionResult:
     """Result of temporal attribution analysis."""
 
     attributions: torch.Tensor  # [T, ...] attribution scores
-    baseline: Optional[torch.Tensor]  # Baseline input
+    baseline: torch.Tensor | None  # Baseline input
     predictions: torch.Tensor  # Model predictions
-    convergence_score: Optional[float] = None
+    convergence_score: float | None = None
 
-    def get_top_timesteps(self, k: int = 5) -> List[Tuple[int, float]]:
+    def get_top_timesteps(self, k: int = 5) -> list[tuple[int, float]]:
         """Get top k most important timesteps.
 
         Returns:
@@ -34,7 +36,7 @@ class AttributionResult:
             scores = self.attributions.abs()
 
         topk = torch.topk(scores, min(k, len(scores)))
-        return list(zip(topk.indices.tolist(), topk.values.tolist()))
+        return list(zip(topk.indices.tolist(), topk.values.tolist(), strict=False))
 
 
 class TemporalIntegratedGradients:
@@ -76,9 +78,9 @@ class TemporalIntegratedGradients:
     def attribute(
         self,
         current_obs: torch.Tensor,
-        past_obs: Optional[torch.Tensor] = None,
-        baseline: Optional[torch.Tensor] = None,
-        target: Optional[Union[int, str]] = None,
+        past_obs: torch.Tensor | None = None,
+        baseline: torch.Tensor | None = None,
+        target: int | str | None = None,
         n_steps: int = 50,
         return_convergence: bool = True,
     ) -> AttributionResult:
@@ -224,7 +226,7 @@ class TemporalSHAP:
         """
         T = input_sequence.shape[0]
 
-        background = torch.cat(
+        torch.cat(
             [
                 input_sequence,
                 torch.zeros_like(input_sequence),
@@ -292,9 +294,9 @@ class CausalTracer:
         self,
         trajectory: Any,
         target_behavior: str,
-        components: Optional[List[str]] = None,
-        intervention_value: Optional[torch.Tensor] = None,
-    ) -> Dict[str, float]:
+        components: list[str] | None = None,
+        intervention_value: torch.Tensor | None = None,
+    ) -> dict[str, float]:
         """Trace causal influence through components.
 
         Args:
@@ -345,7 +347,7 @@ class CausalTracer:
         trajectory: Any,
         component: str,
         timestep: int,
-        value: Optional[torch.Tensor] = None,
+        value: torch.Tensor | None = None,
     ) -> Any:
         """Intervene at specific component/timestep."""
         if value is None:

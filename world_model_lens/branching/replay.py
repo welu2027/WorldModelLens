@@ -1,4 +1,3 @@
-from __future__ import annotations
 """Intervention Replay System for world model debugging.
 
 This module provides tools for:

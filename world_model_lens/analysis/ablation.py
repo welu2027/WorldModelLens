@@ -1,4 +1,12 @@
 from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+import torch
+
 """Ablation engine for systematic analysis of world model components.
 
 This module provides tools for:
@@ -7,13 +15,6 @@ This module provides tools for:
 - Neuron-level ablation
 - Causal ablation studies
 """
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Any, Callable, Optional
-import torch
-import numpy as np
 
 
 @dataclass

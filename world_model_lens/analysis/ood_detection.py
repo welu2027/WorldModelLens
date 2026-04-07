@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """Out-of-Distribution (OOD) detection for world model latent spaces.
 
 This module provides multiple OOD detection methods:
@@ -12,11 +13,10 @@ This module provides multiple OOD detection methods:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
+
 import torch
-import numpy as np
 from sklearn.ensemble import IsolationForest
-from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import NearestNeighbors
 from sklearn.preprocessing import StandardScaler
 
@@ -42,11 +42,11 @@ class MahalanobisOODDetector:
             device: Device for computations
         """
         self.device = device
-        self.mean: Optional[torch.Tensor] = None
-        self.cov_inv: Optional[torch.Tensor] = None
+        self.mean: torch.Tensor | None = None
+        self.cov_inv: torch.Tensor | None = None
         self.fitted = False
 
-    def fit(self, training_data: torch.Tensor) -> "MahalanobisOODDetector":
+    def fit(self, training_data: torch.Tensor) -> MahalanobisOODDetector:
         """Fit the detector on training data.
 
         Args:
@@ -88,7 +88,7 @@ class MahalanobisOODDetector:
     def detect(
         self,
         data: torch.Tensor,
-        threshold: Optional[float] = None,
+        threshold: float | None = None,
     ) -> OODResult:
         """Detect OOD samples.
 
@@ -127,11 +127,11 @@ class IsolationForestDetector:
         """
         self.contamination = contamination
         self.random_state = random_state
-        self.model: Optional[IsolationForest] = None
+        self.model: IsolationForest | None = None
         self.scaler = StandardScaler()
         self.fitted = False
 
-    def fit(self, training_data: torch.Tensor) -> "IsolationForestDetector":
+    def fit(self, training_data: torch.Tensor) -> IsolationForestDetector:
         """Fit the detector.
 
         Args:
@@ -173,7 +173,7 @@ class IsolationForestDetector:
     def detect(
         self,
         data: torch.Tensor,
-        threshold: Optional[float] = None,
+        threshold: float | None = None,
     ) -> OODResult:
         """Detect OOD samples.
 
@@ -210,10 +210,10 @@ class EnergyOODDetector:
             temperature: Temperature for energy computation
         """
         self.temperature = temperature
-        self.model: Optional[torch.nn.Module] = None
+        self.model: torch.nn.Module | None = None
         self.fitted = False
 
-    def fit(self, training_data: torch.Tensor) -> "EnergyOODDetector":
+    def fit(self, training_data: torch.Tensor) -> EnergyOODDetector:
         """Store training statistics.
 
         Args:
@@ -246,7 +246,7 @@ class EnergyOODDetector:
     def detect(
         self,
         data: torch.Tensor,
-        threshold: Optional[float] = None,
+        threshold: float | None = None,
     ) -> OODResult:
         """Detect OOD samples.
 
@@ -283,11 +283,11 @@ class KNNDensityDetector:
             k: Number of neighbors
         """
         self.k = k
-        self.model: Optional[NearestNeighbors] = None
+        self.model: NearestNeighbors | None = None
         self.scaler = StandardScaler()
         self.fitted = False
 
-    def fit(self, training_data: torch.Tensor) -> "KNNDensityDetector":
+    def fit(self, training_data: torch.Tensor) -> KNNDensityDetector:
         """Fit the detector.
 
         Args:
@@ -329,7 +329,7 @@ class KNNDensityDetector:
     def detect(
         self,
         data: torch.Tensor,
-        threshold: Optional[float] = None,
+        threshold: float | None = None,
     ) -> OODResult:
         """Detect OOD samples.
 
@@ -369,7 +369,7 @@ class EnsembleOODDetector:
         self.detectors: dict[str, Any] = {}
         self.fitted = False
 
-    def fit(self, training_data: torch.Tensor) -> "EnsembleOODDetector":
+    def fit(self, training_data: torch.Tensor) -> EnsembleOODDetector:
         """Fit all detectors.
 
         Args:
@@ -412,7 +412,7 @@ class EnsembleOODDetector:
     def detect(
         self,
         data: torch.Tensor,
-        threshold: Optional[float] = None,
+        threshold: float | None = None,
         fusion: str = "mean",
     ) -> OODResult:
         """Detect OOD samples using ensemble.

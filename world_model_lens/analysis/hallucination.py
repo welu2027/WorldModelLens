@@ -1,4 +1,12 @@
 from __future__ import annotations
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+import torch
+import torch.nn.functional as functional
+
 """Hallucination detection for world model predictions.
 
 This module provides multiple methods to detect when world models produce
@@ -8,13 +16,6 @@ hallucinated or unrealistic predictions:
 - Physics-based: Verify physical constraints
 - Uncertainty-based: Use prediction confidence
 """
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-from typing import Any, Optional, Callable
-import torch
-import torch.nn.functional as F
 
 
 @dataclass
@@ -60,15 +61,15 @@ class ReconstructionHallucinationDetector:
             HallucinationResult
         """
         if self.method == "mse":
-            errors = F.mse_loss(observations, reconstructions, reduction="none").mean(
+            errors = functional.mse_loss(observations, reconstructions, reduction="none").mean(
                 dim=list(range(1, observations.dim()))
             )
         elif self.method == "mae":
-            errors = F.l1_loss(observations, reconstructions, reduction="none").mean(
+            errors = functional.l1_loss(observations, reconstructions, reduction="none").mean(
                 dim=list(range(1, observations.dim()))
             )
         else:
-            errors = F.mse_loss(observations, reconstructions, reduction="none").mean(
+            errors = functional.mse_loss(observations, reconstructions, reduction="none").mean(
                 dim=list(range(1, observations.dim()))
             )
 
@@ -235,7 +236,7 @@ class PhysicsHallucinationDetector:
         for i, state in enumerate(states):
             total_violation = 0.0
 
-            for name, constraint_fn in self.constraints:
+            for _name, constraint_fn in self.constraints:
                 if actions and i < len(actions):
                     violation = constraint_fn(state, actions[i])
                 else:
