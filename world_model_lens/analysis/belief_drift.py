@@ -9,10 +9,10 @@ This module provides tools to detect when world model beliefs become unstable:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Any
+
 import torch
-import numpy as np
 from sklearn.cluster import KMeans
 
 
@@ -308,7 +308,6 @@ class ConceptDriftDetector:
         Returns:
             DriftResult
         """
-        from world_model_lens.analysis.belief_analyzer import BeliefAnalyzer
 
         if not hasattr(trajectory, "concept_tracking") or trajectory.concept_tracking is None:
             return DriftResult(

@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 """Representation engineering tools for world model latent spaces.
 
 This module provides tools for:
@@ -10,10 +11,11 @@ This module provides tools for:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any
+
 import torch
-import torch.nn.functional as F
 
 
 @dataclass
@@ -251,7 +253,7 @@ class ActivationAdditionSteering:
         dirs = directions or list(self.directions.keys())
         mags = magnitudes or [1.0] * len(dirs)
 
-        for name, mag in zip(dirs, mags):
+        for name, mag in zip(dirs, mags, strict=False):
             if name in self.directions:
                 direction = self.directions[name].to(activation.device)
                 result = result + mag * direction

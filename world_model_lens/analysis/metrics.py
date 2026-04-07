@@ -1,7 +1,8 @@
 """Latent space metrics for world model evaluation."""
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
+
 import torch
 import torch.nn.functional as F
 
@@ -59,7 +60,7 @@ class LatentMetrics:
             return 0.0
 
         actions = actions[:-1]
-        next_latents = latents[1:]
+        latents[1:]
         current_latents = latents[:-1]
 
         joint = torch.cat([actions, current_latents], dim=1)
@@ -81,7 +82,7 @@ class LatentMetrics:
         return max(0.0, float(mi.item()))
 
     @staticmethod
-    def temporal_hierarchy(latents: torch.Tensor) -> Dict[str, Any]:
+    def temporal_hierarchy(latents: torch.Tensor) -> dict[str, Any]:
         """Analyze temporal hierarchy in latent sequences.
 
         Args:
@@ -156,7 +157,7 @@ class LatentMetrics:
 
     @staticmethod
     def compute_all(
-        latents: torch.Tensor, actions: torch.Tensor, original_obs: Optional[torch.Tensor] = None
+        latents: torch.Tensor, actions: torch.Tensor, original_obs: torch.Tensor | None = None
     ) -> LatentMetricsResult:
         """Compute all metrics at once.
 
@@ -189,7 +190,7 @@ class CausalBenchmark:
     """Benchmark for causal analysis methods."""
 
     @staticmethod
-    def evaluate_patching(model: Any, ground_truth_circuit: Dict[str, Any]) -> Dict[str, float]:
+    def evaluate_patching(model: Any, ground_truth_circuit: dict[str, Any]) -> dict[str, float]:
         """Evaluate patching accuracy against ground truth.
 
         Args:
@@ -202,7 +203,7 @@ class CausalBenchmark:
         return {"precision": 0.0, "recall": 0.0, "f1": 0.0}
 
     @staticmethod
-    def probe_attribution_accuracy(model: Any, concepts: Dict[str, torch.Tensor]) -> float:
+    def probe_attribution_accuracy(model: Any, concepts: dict[str, torch.Tensor]) -> float:
         """Measure accuracy of probe-based attribution.
 
         Args:
@@ -215,7 +216,7 @@ class CausalBenchmark:
         return 0.0
 
     @staticmethod
-    def circuit_stability(model: Any, perturbations: List[Dict[str, Any]]) -> float:
+    def circuit_stability(model: Any, perturbations: list[dict[str, Any]]) -> float:
         """Measure stability of discovered circuits under perturbation.
 
         Args:
