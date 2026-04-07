@@ -145,7 +145,7 @@ class ImaginationBrancher:
         for actions in action_sequences:
             imagined = self.wm.imagine(
                 start_state=start_state,
-                action_sequence=actions,
+                actions=actions,
                 horizon=horizon,
             )
             imagined.fork_point = fork_at
@@ -188,8 +188,7 @@ class ImaginationBrancher:
 
         original = self.wm.imagine(
             start_state=start_state,
-            policy=policy,
-            action_sequence=action_sequence,
+            actions=action_sequence,
             horizon=horizon,
         )
         original.fork_point = fork_at
@@ -201,8 +200,7 @@ class ImaginationBrancher:
 
         manipulated = self.wm.imagine(
             start_state=manipulated_state,
-            policy=policy,
-            action_sequence=action_sequence,
+            actions=action_sequence,
             horizon=horizon,
         )
         manipulated.fork_point = fork_at
@@ -285,7 +283,6 @@ class ImaginationBrancher:
         for _ in range(n_samples):
             traj = self.wm.imagine(
                 start_state=start_state,
-                policy=policy,
                 horizon=horizon,
                 temperature=temperature,
             )

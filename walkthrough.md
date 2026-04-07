@@ -79,7 +79,7 @@ graph TD
 | `world_model_lens/probing/` | Linear probing & geometry | `prober.py`, `geometry.py`, `layer_prober.py`, `temporal_memory.py` |
 | `world_model_lens/sae/` | Sparse Autoencoders | `sae.py`, `trainer.py`, `evaluator.py` |
 | `world_model_lens/safety/` | Safety auditing & robustness | `analyzer.py`, `robustness.py` |
-| `world_model_lens/branching/` | Imagination branching & counterfactuals | `brancer.py`, `counterfactual.py`, `replay.py` |
+| `world_model_lens/branching/` | Imagination branching & counterfactuals | `brancher.py`, `counterfactual.py`, `replay.py` |
 | `world_model_lens/causal/` | Causal effect estimation | `effect_estimator.py`, `trajectory_attribution.py`, `counterfactual.py` |
 | `world_model_lens/visualization/` | Plotly-based visualizations | `latent_plots.py`, `prediction_plots.py`, `intervention_plots.py`, `temporal_maps.py` |
 | `world_model_lens/hub/` | HuggingFace model/trajectory sharing | `model_hub.py`, `trajectory_hub.py` |
@@ -236,7 +236,7 @@ Each adapter exposes a `WorldModelCapabilities` descriptor (uses_actions, has_re
 
 - `analyzer.py` — Comprehensive safety audit reports
 - `robustness.py` — Adversarial perturbation analysis
-- `brancer.py` — Fork trajectories at any point for "what-if" exploration
+- `brancher.py` — Fork trajectories at any point for "what-if" exploration
 - `counterfactual.py` — Counterfactual analysis
 
 ---

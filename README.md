@@ -194,8 +194,8 @@ z_t = cache["z_posterior", 5]  # latent at timestep 5
 # Replay a specific trajectory
 from world_model_lens.branching import ImaginationBrancher
 
-brancer = ImaginationBrancher(wm)
-branch = brancer.create_branch(traj, branch_point=5)
+brancher = ImaginationBrancher(wm)
+branch = brancher.create_branch(traj, branch_point=5)
 
 # What if we took a different action?
 forked = branch.fork()
@@ -387,7 +387,7 @@ world_model_lens/
 │   └── sae.py               # SAE model definition
 │
 ├── branching/                # Branching tools
-│   ├── brancer.py           # Imagination branching
+│   ├── brancher.py          # Imagination branching
 │   └── counterfactual.py    # Counterfactual analysis
 │
 ├── safety/                   # Safety analysis
