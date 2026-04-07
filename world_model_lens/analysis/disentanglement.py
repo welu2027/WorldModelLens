@@ -11,9 +11,10 @@ Metrics:
 """
 
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any, Tuple, TYPE_CHECKING
-import torch
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
+import torch
 
 if TYPE_CHECKING:
     from world_model_lens.core.activation_cache import ActivationCache
@@ -23,16 +24,16 @@ if TYPE_CHECKING:
 class DisentanglementResult:
     """Result of disentanglement analysis."""
 
-    correlation_matrix: Optional[np.ndarray] = None
-    mig_score: Optional[float] = None
-    dci_disentanglement: Optional[float] = None
-    dci_completeness: Optional[float] = None
-    dci_informativeness: Optional[float] = None
-    sap_score: Optional[float] = None
-    latent_variance: Optional[List[float]] = None
-    factor_variance: Optional[List[float]] = None
+    correlation_matrix: np.ndarray | None = None
+    mig_score: float | None = None
+    dci_disentanglement: float | None = None
+    dci_completeness: float | None = None
+    dci_informativeness: float | None = None
+    sap_score: float | None = None
+    latent_variance: list[float] | None = None
+    factor_variance: list[float] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "mig_score": self.mig_score,
             "dci_disentanglement": self.dci_disentanglement,
@@ -116,12 +117,6 @@ class DisentanglementAnalyzer:
 
             for j in range(n_latents):
                 latent_vals = latents_np[:, j]
-                h_factor = self._entropy(factor_bins)
-                h_latent = self._entropy(
-                    np.digitize(
-                        latent_vals, np.linspace(latent_vals.min(), latent_vals.max(), self.n_bins)
-                    )
-                )
 
                 joint_hist, _, _ = np.histogram2d(
                     factor_bins,
@@ -163,7 +158,7 @@ class DisentanglementAnalyzer:
         self,
         latents: torch.Tensor,
         factors: torch.Tensor,
-    ) -> Tuple[float, float, float]:
+    ) -> tuple[float, float, float]:
         """Compute DCI metrics (Disentanglement, Completeness, Informativeness).
 
         Args:
@@ -298,7 +293,7 @@ class DisentanglementAnalyzer:
         self,
         cache: "ActivationCache",
         latent_key: str = "z",
-        factors: Optional[torch.Tensor] = None,
+        factors: torch.Tensor | None = None,
     ) -> DisentanglementResult:
         """Analyze disentanglement from activation cache.
 

@@ -5,13 +5,13 @@ This module provides analyzers that work with ANY world model type:
 - Non-RL models: core latent analysis (surprise, geometry, disentanglement)
 """
 
-from typing import Any, Callable, Dict, List, Optional, Tuple, TYPE_CHECKING
-import torch
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+import torch
 
 if TYPE_CHECKING:
-    from world_model_lens import HookedWorldModel, LatentTrajectory, ActivationCache
-    from world_model_lens.core.activation_cache import ActivationCache
+    from world_model_lens import ActivationCache, HookedWorldModel, LatentTrajectory
 
 
 @dataclass
@@ -19,7 +19,7 @@ class SurpriseResult:
     """Result of surprise analysis."""
 
     kl_sequence: torch.Tensor
-    peaks: List[Tuple[int, float]]
+    peaks: list[tuple[int, float]]
     mean_surprise: float
     max_surprise_timestep: int
     max_surprise_value: float
@@ -58,7 +58,7 @@ class ConceptSearchResult:
 
     concept_name: str
     dim_scores: torch.Tensor
-    top_dims: List[int]
+    top_dims: list[int]
     concept_vector: torch.Tensor
     method: str
 
@@ -85,7 +85,7 @@ class SaliencyResult:
     """Result of saliency analysis."""
 
     h_saliency: torch.Tensor
-    z_saliency: Optional[torch.Tensor]
+    z_saliency: torch.Tensor | None
     method: str
     timestep: int
 
@@ -109,7 +109,7 @@ class HallucinationResult:
     """Result of hallucination detection."""
 
     divergence_timeline: torch.Tensor
-    hallucination_timesteps: List[int]
+    hallucination_timesteps: list[int]
     severity_score: float
 
     def plot_timeline(self, threshold: float = 0.5, figsize=(12, 4)):
@@ -131,8 +131,8 @@ class HallucinationResult:
 class DisentanglementResult:
     """Result of disentanglement analysis."""
 
-    scores: Dict[str, float]
-    factor_dim_assignment: Dict[str, List[int]]
+    scores: dict[str, float]
+    factor_dim_assignment: dict[str, list[int]]
     total_score: float
 
     def heatmap(self, figsize=(10, 8)):
@@ -141,15 +141,10 @@ class DisentanglementResult:
         import numpy as np
 
         factors = list(self.factor_dim_assignment.keys())
-        n_dims = (
-            max(len(dims) for dims in self.factor_dim_assignment.values())
-            if self.factor_dim_assignment
-            else 0
-        )
 
         fig, ax = plt.subplots(figsize=figsize)
         data = np.zeros((len(factors), 32))
-        for i, (factor, dims) in enumerate(self.factor_dim_assignment.items()):
+        for i, (_factor, dims) in enumerate(self.factor_dim_assignment.items()):
             for d in dims:
                 if d < 32:
                     data[i, d] = 1.0
@@ -171,8 +166,8 @@ class RewardAttributionResult:
     """
 
     dim_attribution: torch.Tensor
-    top_dims: List[int]
-    top_attribution_values: List[float]
+    top_dims: list[int]
+    top_attribution_values: list[float]
     is_available: bool = True
 
     def __post_init__(self):
@@ -225,8 +220,8 @@ class BeliefAnalyzer:
     def surprise_timeline(
         self,
         cache: "ActivationCache",
-        obs_seq: Optional[torch.Tensor] = None,
-        decoder: Optional[Any] = None,
+        obs_seq: torch.Tensor | None = None,
+        decoder: Any | None = None,
     ) -> SurpriseResult:
         """Compute surprise (KL divergence) timeline.
 
@@ -281,8 +276,8 @@ class BeliefAnalyzer:
     def concept_search(
         self,
         concept_name: str,
-        positive_timesteps: List[int],
-        negative_timesteps: List[int],
+        positive_timesteps: list[int],
+        negative_timesteps: list[int],
         cache: "ActivationCache",
         component: str = "z_posterior",
         method: str = "mean_difference",
@@ -355,7 +350,7 @@ class BeliefAnalyzer:
         timestep: int,
         target: str = "state",
         method: str = "gradient",
-        target_class: Optional[int] = None,
+        target_class: int | None = None,
     ) -> SaliencyResult:
         """Compute saliency maps for latent representations.
 
@@ -478,7 +473,7 @@ class BeliefAnalyzer:
         self,
         real_traj: "LatentTrajectory",
         imagined_traj: "LatentTrajectory",
-        decoder: Optional[Any] = None,
+        decoder: Any | None = None,
         method: str = "latent_distance",
         threshold: float = 0.5,
     ) -> HallucinationResult:
@@ -500,9 +495,9 @@ class BeliefAnalyzer:
         divergences = []
         hallucination_timesteps = []
 
-        T = min(len(real_traj.states), len(imagined_traj.states))
+        num_timesteps = min(len(real_traj.states), len(imagined_traj.states))
 
-        for t in range(T):
+        for t in range(num_timesteps):
             real_state = real_traj.states[t].state
             imag_state = imagined_traj.states[t].state
 
@@ -534,8 +529,8 @@ class BeliefAnalyzer:
     def disentanglement_score(
         self,
         cache: "ActivationCache",
-        factors: Optional[Dict[str, torch.Tensor]] = None,
-        metrics: List[str] = ["MIG", "DCI", "SAP"],
+        factors: dict[str, torch.Tensor] | None = None,
+        metrics: list[str] | None = None,
         component: str = "z_posterior",
     ) -> DisentanglementResult:
         """Compute disentanglement metrics.
@@ -553,8 +548,11 @@ class BeliefAnalyzer:
         Returns:
             DisentanglementResult with scores.
         """
-        scores: Dict[str, float] = {}
-        factor_dim_assignment: Dict[str, List[int]] = {}
+        scores: dict[str, float] = {}
+        factor_dim_assignment: dict[str, list[int]] = {}
+
+        if metrics is None:
+            metrics = ["MIG", "DCI", "SAP"]
 
         try:
             z_seq = cache[component]
@@ -659,7 +657,7 @@ class BeliefAnalyzer:
         except ImportError:
             return 0.0
 
-    def _compute_dci(self, z_flat: torch.Tensor, factors: torch.Tensor) -> Tuple[float, List[int]]:
+    def _compute_dci(self, z_flat: torch.Tensor, factors: torch.Tensor) -> tuple[float, list[int]]:
         """Compute Disentanglement, Completeness, Informativeness.
 
         Args:
@@ -690,7 +688,7 @@ class BeliefAnalyzer:
                     clf.fit(dim_vals, factor_vals)
                     score = clf.score(dim_vals, factor_vals)
                     dim_importance.append((d, score))
-                except:
+                except Exception:
                     dim_importance.append((d, 0.0))
 
             dim_importance.sort(key=lambda x: x[1], reverse=True)
@@ -736,7 +734,9 @@ class BeliefAnalyzer:
                 kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
                 cluster_labels = kmeans.fit_predict(dim_vals)
 
-                correct = sum(1 for c, f in zip(cluster_labels, factors.cpu().numpy()) if c == f)
+                correct = sum(
+                    1 for c, f in zip(cluster_labels, factors.cpu().numpy(), strict=True) if c == f
+                )
                 accuracy = correct / len(factors)
                 dim_scores.append(accuracy)
 
@@ -761,6 +761,7 @@ class BeliefAnalyzer:
             Mutual information value.
         """
         from collections import Counter
+
         import numpy as np
 
         x = np.array(x)
@@ -772,7 +773,7 @@ class BeliefAnalyzer:
 
         p_x = Counter(x)
         p_y = Counter(y)
-        p_xy = Counter(zip(x, y))
+        p_xy = Counter(zip(x, y, strict=True))
 
         mi = 0.0
         for (x_val, y_val), p_xy_val in p_xy.items():
@@ -817,9 +818,6 @@ class BeliefAnalyzer:
 
         try:
             z_seq = cache[component]
-            rewards = (
-                traj.rewards_real if traj.rewards_real is not None else torch.zeros(len(z_seq))
-            )
         except (KeyError, TypeError, AttributeError):
             return RewardAttributionResult(
                 dim_attribution=torch.zeros(32),
@@ -854,7 +852,7 @@ class BeliefAnalyzer:
     def value_analysis(
         self,
         cache: "ActivationCache",
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Analyze value predictions from critic heads.
 
         RL-SPECIFIC: Only available for models with critic heads.

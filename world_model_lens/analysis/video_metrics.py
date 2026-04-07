@@ -13,9 +13,9 @@ Metrics:
 """
 
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
 import torch
-import numpy as np
 
 if TYPE_CHECKING:
     from world_model_lens.core.activation_cache import ActivationCache
@@ -25,14 +25,14 @@ if TYPE_CHECKING:
 class VideoMetricsResult:
     """Result of video prediction metrics."""
 
-    psnr: Optional[float] = None
-    ssim: Optional[float] = None
-    mse: Optional[float] = None
-    mae: Optional[float] = None
-    per_frame_psnr: Optional[List[float]] = None
-    per_frame_ssim: Optional[List[float]] = None
+    psnr: float | None = None
+    ssim: float | None = None
+    mse: float | None = None
+    mae: float | None = None
+    per_frame_psnr: list[float] | None = None
+    per_frame_ssim: list[float] | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "psnr": self.psnr,
             "ssim": self.ssim,

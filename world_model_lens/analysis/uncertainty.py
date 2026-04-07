@@ -10,10 +10,11 @@ Methods:
 - Disagreement: Measure disagreement across multiple samples
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any, Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
+
 import torch
-import numpy as np
 
 if TYPE_CHECKING:
     from world_model_lens import HookedWorldModel
@@ -23,13 +24,13 @@ if TYPE_CHECKING:
 class UncertaintyResult:
     """Result of uncertainty analysis."""
 
-    mean_prediction: Optional[torch.Tensor] = None
-    variance: Optional[torch.Tensor] = None
-    entropy: Optional[torch.Tensor] = None
-    confidence: Optional[torch.Tensor] = None
-    epistemic_uncertainty: Optional[float] = None
-    aleatoric_uncertainty: Optional[float] = None
-    total_uncertainty: Optional[float] = None
+    mean_prediction: torch.Tensor | None = None
+    variance: torch.Tensor | None = None
+    entropy: torch.Tensor | None = None
+    confidence: torch.Tensor | None = None
+    epistemic_uncertainty: float | None = None
+    aleatoric_uncertainty: float | None = None
+    total_uncertainty: float | None = None
 
 
 class UncertaintyQuantifier:
@@ -171,7 +172,7 @@ class UncertaintyQuantifier:
     def decompose_uncertainty(
         self,
         ensemble_predictions: torch.Tensor,
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """Decompose total uncertainty into epistemic and aleatoric.
 
         Epistemic: uncertainty from model ignorance (reduces with more data)
@@ -187,7 +188,7 @@ class UncertaintyQuantifier:
             ensemble_predictions = ensemble_predictions.unsqueeze(0)
 
         mean_pred = ensemble_predictions.mean(dim=0)
-        variance_pred = ensemble_predictions.var(dim=0)
+        ensemble_predictions.var(dim=0)
 
         mean_prob = torch.softmax(mean_pred, dim=-1)
         entropy_mean = (-mean_prob * torch.log(mean_prob + 1e-8)).sum(dim=-1)

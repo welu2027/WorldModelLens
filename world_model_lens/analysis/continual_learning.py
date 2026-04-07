@@ -8,14 +8,14 @@ Track representations across training epochs to detect:
 This is crucial for continual learning architectures like NEUROGENESIS™.
 """
 
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
-import torch
-import torch.nn.functional as F
-from dataclasses import dataclass, field
-import numpy as np
-from pathlib import Path
 import json
+from dataclasses import dataclass, field
 from datetime import datetime
+from typing import Any
+
+import numpy as np
+import torch
+import torch.nn.functional as functional
 
 
 @dataclass
@@ -25,7 +25,7 @@ class Checkpoint:
     epoch: int
     path: str
     timestamp: datetime
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -37,7 +37,7 @@ class DriftAnalysis:
     cosine_similarity: float
     euclidean_distance: float
     cka_similarity: float
-    concept_stability: Dict[str, float]
+    concept_stability: dict[str, float]
     significant_drift: bool
 
 
@@ -48,7 +48,7 @@ class ConceptStability:
     concept_name: str
     stability_score: float
     first_appeared_epoch: int
-    drift_timeline: List[Tuple[int, float]]
+    drift_timeline: list[tuple[int, float]]
 
 
 class ContinualLearningAuditor:
@@ -74,7 +74,7 @@ class ContinualLearningAuditor:
     def __init__(
         self,
         world_model: Any,
-        reference_trajectory: Optional[Any] = None,
+        reference_trajectory: Any | None = None,
     ):
         """Initialize auditor.
 
@@ -84,14 +84,14 @@ class ContinualLearningAuditor:
         """
         self.wm = world_model
         self.reference_trajectory = reference_trajectory
-        self.checkpoints: Dict[int, Checkpoint] = {}
-        self._cache_store: Dict[int, Any] = {}
+        self.checkpoints: dict[int, Checkpoint] = {}
+        self._cache_store: dict[int, Any] = {}
 
     def register_checkpoint(
         self,
         path: str,
         epoch: int,
-        metadata: Optional[Dict[str, Any]] = None,
+        metadata: dict[str, Any] | None = None,
     ) -> Checkpoint:
         """Register a model checkpoint for comparison.
 
@@ -116,7 +116,7 @@ class ContinualLearningAuditor:
         self,
         epoch: int,
         observations: torch.Tensor,
-        actions: Optional[torch.Tensor] = None,
+        actions: torch.Tensor | None = None,
     ) -> Any:
         """Run model on a specific checkpoint.
 
@@ -172,7 +172,7 @@ class ContinualLearningAuditor:
             latents_a = cache_a[component]
             latents_b = cache_b[component]
         except KeyError:
-            raise ValueError(f"Component {component} not in cache")
+            raise ValueError(f"Component {component} not in cache") from None
 
         # Compute metrics
         cos_sim = self._cosine_similarity(latents_a, latents_b)
@@ -201,7 +201,7 @@ class ContinualLearningAuditor:
         a_flat = a.reshape(a.shape[0], -1)
         b_flat = b.reshape(b.shape[0], -1)
 
-        cos = F.cosine_similarity(a_flat, b_flat, dim=1)
+        cos = functional.cosine_similarity(a_flat, b_flat, dim=1)
         return cos.mean().item()
 
     def _euclidean_distance(
@@ -232,13 +232,13 @@ class ContinualLearningAuditor:
         b_centered = b_flat - b_flat.mean(dim=0)
 
         # Compute Gram matrices
-        Ka = a_centered @ a_centered.T / n
-        Kb = b_centered @ b_centered.T / n
+        ka = a_centered @ a_centered.T / n
+        kb = b_centered @ b_centered.T / n
 
         # Compute HSIC
-        hsic_aa = (Ka * Ka).sum() / (n * n)
-        hsic_bb = (Kb * Kb).sum() / (n * n)
-        hsic_ab = (Ka * Kb).sum() / (n * n)
+        hsic_aa = (ka * ka).sum() / (n * n)
+        hsic_bb = (kb * kb).sum() / (n * n)
+        hsic_ab = (ka * kb).sum() / (n * n)
 
         # CKA
         cka = hsic_ab / (torch.sqrt(hsic_aa * hsic_bb) + 1e-8)
@@ -248,7 +248,7 @@ class ContinualLearningAuditor:
     def check_concept_stability(
         self,
         concept_name: str,
-        epochs: Optional[List[int]] = None,
+        epochs: list[int] | None = None,
     ) -> ConceptStability:
         """Check how stable a concept is across epochs.
 
@@ -291,9 +291,9 @@ class ContinualLearningAuditor:
         self,
         reference_epoch: int,
         current_epoch: int,
-        task_concepts: List[str],
+        task_concepts: list[str],
         threshold: float = 0.2,
-    ) -> Dict[str, bool]:
+    ) -> dict[str, bool]:
         """Detect if old task concepts are being forgotten.
 
         Args:
@@ -305,8 +305,6 @@ class ContinualLearningAuditor:
         Returns:
             Dict mapping concept to whether it's forgotten
         """
-        drift = self.analyze_drift(reference_epoch, current_epoch)
-
         forgotten = {}
 
         for concept in task_concepts:
@@ -317,8 +315,8 @@ class ContinualLearningAuditor:
 
     def full_audit_report(
         self,
-        output_path: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        output_path: str | None = None,
+    ) -> dict[str, Any]:
         """Generate full audit report.
 
         Args:
@@ -376,7 +374,7 @@ class RepresentationTracker:
 
     def __init__(self, world_model: Any):
         self.wm = world_model
-        self._snapshots: Dict[int, Dict[str, torch.Tensor]] = {}
+        self._snapshots: dict[int, dict[str, torch.Tensor]] = {}
 
     def snapshot_epoch(
         self,
@@ -384,7 +382,6 @@ class RepresentationTracker:
         observations: torch.Tensor,
     ) -> None:
         """Capture full representation snapshot for an epoch."""
-        from world_model_lens.core.activation_cache import ActivationCache
 
         traj, cache = self.wm.run_with_cache(observations)
 
@@ -404,7 +401,7 @@ class RepresentationTracker:
         epoch_a: int,
         epoch_b: int,
         layer_name: str,
-    ) -> Dict[str, float]:
+    ) -> dict[str, float]:
         """Compare a specific layer across epochs."""
         if epoch_a not in self._snapshots:
             raise ValueError(f"Epoch {epoch_a} not snapshotted")
@@ -418,7 +415,7 @@ class RepresentationTracker:
             return {"error": f"Layer {layer_name} not found"}
 
         return {
-            "cosine_similarity": F.cosine_similarity(
+            "cosine_similarity": functional.cosine_similarity(
                 layer_a.flatten().unsqueeze(0),
                 layer_b.flatten().unsqueeze(0),
             ).item(),
