@@ -8,5 +8,9 @@ backends
 analysis
 probing
 causal
+branching
+patching
+monitoring
+envs
 cli
 ```
