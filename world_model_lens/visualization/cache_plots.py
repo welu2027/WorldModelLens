@@ -5,7 +5,7 @@ from typing import Any, Dict
 
 class CacheSignalPlotter:
     """Plotters for arbitrary signals extracted from ActivationCache.
-    
+
     Examples:
         plotter = CacheSignalPlotter()
         data = plotter.plot_surprise_timeline(cache)
@@ -25,15 +25,36 @@ class CacheSignalPlotter:
         if hasattr(cache, "surprise"):
             try:
                 surprises = cache.surprise()
-                timesteps = np.array(sorted(surprises.keys()))
-                kl_values = np.array([surprises[t].item() if isinstance(surprises[t], torch.Tensor) else float(surprises[t]) for t in timesteps])
+                if isinstance(surprises, dict):
+                    # Old API: dict[int, torch.Tensor]
+                    timesteps = np.array(sorted(surprises.keys()))
+                    kl_values = np.array(
+                        [
+                            surprises[t].item()
+                            if isinstance(surprises[t], torch.Tensor)
+                            else float(surprises[t])
+                            for t in timesteps
+                        ]
+                    )
+                elif isinstance(surprises, torch.Tensor):
+                    # New API: torch.Tensor of shape [T]
+                    # Get timesteps from z_posterior keys
+                    timesteps = sorted({t for n, t in cache._store.keys() if n == "z_posterior"})
+                    if len(timesteps) != len(surprises):
+                        raise ValueError(
+                            f"Mismatch: {len(timesteps)} timesteps but {len(surprises)} surprise values"
+                        )
+                    kl_values = surprises.detach().cpu().numpy()
+                    timesteps = np.array(timesteps)
+                else:
+                    raise ValueError(f"Unexpected surprise type: {type(surprises)}")
                 return {"timesteps": timesteps, "kl_values": kl_values}
-            except KeyError:
+            except (KeyError, AttributeError, ValueError):
                 pass
-        
+
         # Fallback if surprise() fails or not present, but we have "kl" keys
-        timesteps = sorted([t for (n, t) in cache.keys() if n == 'kl'])
-        kl_values = np.array([cache.get('kl', t).item() for t in timesteps])
+        timesteps = sorted([t for (n, t) in cache.keys() if n == "kl"])
+        kl_values = np.array([cache.get("kl", t).item() for t in timesteps])
         return {"timesteps": np.array(timesteps), "kl_values": kl_values}
 
     @staticmethod
@@ -56,12 +77,16 @@ class CacheSignalPlotter:
             r_real = state.reward_real
 
             if r_pred is not None:
-                predicted.append(float(r_pred) if not isinstance(r_pred, torch.Tensor) else r_pred.item())
+                predicted.append(
+                    float(r_pred) if not isinstance(r_pred, torch.Tensor) else r_pred.item()
+                )
             else:
                 predicted.append(0.0)
-            
+
             if r_real is not None:
-                actual.append(float(r_real) if not isinstance(r_real, torch.Tensor) else r_real.item())
+                actual.append(
+                    float(r_real) if not isinstance(r_real, torch.Tensor) else r_real.item()
+                )
             else:
                 actual.append(0.0)
 

@@ -248,6 +248,8 @@ class ActivationCache:
             posterior_vals = []
             prior_vals = []
             timesteps = sorted({t for n, t in self._store.keys() if n == "z_posterior"})
+            if not timesteps:
+                raise KeyError("No z_posterior found")
 
             for t in timesteps:
                 post_key = ("z_posterior", t)
