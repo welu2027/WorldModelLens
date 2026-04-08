@@ -4,104 +4,79 @@
 
 **File:** `examples/01_quickstart.py`
 
-**What it teaches:** The fundamental workflow for interpretability analysis.
+**What this example shows:** The minimum end-to-end workflow for wrapping a model, collecting activations, inspecting cached tensors, and rolling the model forward in imagination mode.
 
-### What It Does
+## Prerequisites
 
-1. Creates a DreamerV3 world model with a configuration
-2. Wraps it in `HookedWorldModel` to enable activation caching
-3. Runs a forward pass, collecting activations along the way
-4. Extracts and inspects cached activations
-5. Uses imagination to rollout from a mid-trajectory state
+- Base installation of `world_model_lens`
+- No optional extras required
+- Familiarity with `HookedWorldModel`, `WorldModelConfig`, and tensor shapes
 
-### Key Concepts
+## Modules Used
 
-- **HookedWorldModel**: Central wrapper that intercepts activations
-- **Cache**: Dictionary of all intermediate activations (h_t, z_posterior, z_prior, etc.)
-- **Trajectory**: The sequence of model states produced by a forward pass
-- **Imagination**: Continuing from a latent state without real observations
+- `world_model_lens.HookedWorldModel`
+- `world_model_lens.WorldModelConfig`
+- `world_model_lens.backends.dreamerv3.DreamerV3Adapter`
 
-### Code Walkthrough
+Related API pages:
+- [core.md](C:\Users\user\Desktop\WorldModelLens\docs\api\core.md)
+- [backends.md](C:\Users\user\Desktop\WorldModelLens\docs\api\backends.md)
 
-```python
-# Step 1: Setup
-cfg = WorldModelConfig(d_h=256, n_cat=32, ...)
-adapter = DreamerV3Adapter(cfg)
-wm = HookedWorldModel(adapter=adapter, config=cfg)
+## What It Does
 
-# Step 2: Data
-obs_seq = torch.randn(10, 3, 64, 64)  # 10 frames, 3 channels, 64x64
-action_seq = torch.randn(10, 4)       # 10 actions, 4-dimensional
+1. Builds a model config and backend adapter.
+2. Wraps the backend in `HookedWorldModel`.
+3. Runs a forward pass with caching enabled.
+4. Reads a few cached components by name and timestep.
+5. Starts an imagination rollout from a state in the recorded trajectory.
 
-# Step 3: Forward pass with caching
-traj, cache = wm.run_with_cache(obs_seq, action_seq)
-
-# Step 4: Inspect results
-print(traj.length)                 # How many states?
-print(cache.component_names)       # What was cached?
-h_t = cache["h", 0]               # Hidden state at t=0
-z_posterior = cache["z_posterior"] # All posterior samples
-
-# Step 5: Imagination
-imagined = wm.imagine(start_state=traj.states[5], horizon=20)
-```
-
-### What the Cache Contains
-
-For a DreamerV3 world model, the cache typically includes:
-
-| Component | Shape | Meaning |
-|-----------|-------|---------|
-| `h` | (T, d_h) | Hidden state from encoder/RNN |
-| `z_posterior` | (T, n_cat, n_cls) | Posterior latent distribution |
-| `z_prior` | (T, n_cat, n_cls) | Prior latent (from dynamics) |
-| `reward_pred` | (T, 1) | Predicted rewards |
-| `value_pred` | (T, 1) | Estimated values |
-
-Access by component name or with index: `cache["component_name", t]` or `cache["component_name"]`
-
-### Running It
+## How To Run
 
 ```bash
 python examples/01_quickstart.py
 ```
 
-Expected output:
-```
-============================================================
-World Model Lens - Quickstart Example
-============================================================
+## Expected Output
 
-[1] Config created: d_h=256, n_cat=32, n_cls=32
-[2] DreamerV3Adapter initialized
-[3] HookedWorldModel wrapper created
-[4] Created fake data: obs=torch.Size([10, 3, 64, 64]), actions=torch.Size([10, 4])
-[5] Forward pass complete!
-    Trajectory length: 10
-    Cache keys: ['h', 'z_posterior', 'z_prior', 'reward_pred', 'value_pred']
-[6] Sample activations:
-    h_t shape: torch.Size([256])
-    z_posterior shape: torch.Size([32, 32])
-[7] Imagination complete: 20 steps
+You should see:
 
-============================================================
-Quickstart complete!
-============================================================
-```
+- configuration summary
+- model and wrapper initialization logs
+- trajectory length
+- cache component names
+- sample tensor shapes for one or two cached activations
+- an imagination rollout summary
 
-### Key Takeaways
+Exact numeric values can vary if the example uses random inputs.
 
-- **HookedWorldModel** intercepts activations automatically
-- **cache** is a dictionary-like object with timestep indexing
-- **traj.states** contains StateDict objects with latent information
-- **wm.imagine()** continues from any state without observations
+## What To Inspect
 
-### Next Steps
+Focus on these objects after the run:
 
-Once comfortable with this example:
-- Modify the config (try different d_h, n_cat values)
-- Change the trajectory length (T)
-- Extract different components from the cache
-- Try longer imagination horizons
+- `traj.length`: confirms the forward pass produced a full trajectory
+- `cache.component_names`: confirms which activations were captured
+- `cache["h", 0]`: a single hidden state slice
+- `cache["z_posterior"]`: a full component across all timesteps
+- `imagined`: confirms the model can continue from latent state alone
 
-Then proceed to Example 02 to learn how to **use** these cached activations.
+## Why It Matters
+
+This is the base pattern used by almost every other example:
+
+1. run a trajectory
+2. collect cache
+3. extract components
+4. analyze or intervene
+
+If this example is unclear, the rest of the examples will be harder to reason about.
+
+## Common Failure Modes
+
+- Missing backend dependencies: verify the package installed correctly from the repo root.
+- Shape mismatches between observations and actions: check `d_obs` and `d_action` in the config.
+- Empty or unexpected cache contents: inspect backend hook names and cached component registration.
+
+## Next Examples
+
+- [analysis-techniques.md](C:\Users\user\Desktop\WorldModelLens\docs\examples\analysis-techniques.md) for probing, patching, and branching
+- [advanced-analysis.md](C:\Users\user\Desktop\WorldModelLens\docs\examples\advanced-analysis.md) once you are comfortable reading cache outputs

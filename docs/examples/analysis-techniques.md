@@ -1,249 +1,163 @@
 # Core Analysis Techniques
 
-These three examples cover the main interpretability methods: understanding what activations encode (probing), identifying causal roles (patching), and exploring counterfactuals (branching).
+These three examples introduce the main interpretability workflows: probing for encoded information, patching for causal influence, and branching for alternative futures.
 
 ## Example 02: Linear Probing
 
 **File:** `examples/02_probing.py`
 
-**What it teaches:** How to train classifiers on activations to understand what they encode.
+**What this example shows:** How to test whether latent activations encode specific concepts by training simple probes.
 
-### What It Does
+### Prerequisites
 
-1. Collects activations from 5 random trajectories
-2. Creates synthetic labels (3 concepts: reward_region, novel_state, high_value)
-3. Trains linear probes on the z_posterior activations
-4. Reports accuracy for each concept
+- Comfort with Example 01
+- Basic understanding of supervised classification metrics
 
-### Why Probing?
+### Modules Used
 
-Probing answers: **"What information is encoded in this activation?"**
+- `world_model_lens.probing.LatentProber`
+- cached activations from `HookedWorldModel`
 
-Example: If you train a probe on `z_posterior` to predict "reward regions" and it gets 85% accuracy, the model's latent representation contains reward-predictive information.
+Related API pages:
+- [probing.md](C:\Users\user\Desktop\WorldModelLens\docs\api\probing.md)
+- [core.md](C:\Users\user\Desktop\WorldModelLens\docs\api\core.md)
 
-### Code Walkthrough
-
-```python
-# Collect activations from multiple episodes
-all_activations = []
-for ep in range(5):
-    obs_seq = torch.randn(20, 3, 64, 64)
-    action_seq = torch.randn(20, cfg.d_action)
-    traj, cache = wm.run_with_cache(obs_seq, action_seq)
-    
-    # Extract z_posterior activations
-    z_posterior = cache["z_posterior"]
-    z_flat = z_posterior.flatten(1)
-    all_activations.append(z_flat)
-
-# Stack all
-activations = torch.cat(all_activations, dim=0)  # (N, latent_dim)
-
-# Define concepts as labels
-concepts = {
-    "reward_region": (labels == 0).astype(np.float32),
-    "novel_state": (labels == 1).astype(np.float32),
-    "high_value": (labels == 2).astype(np.float32),
-}
-
-# Train probes
-prober = LatentProber(seed=42)
-sweep_result = prober.sweep(
-    cache={"z_posterior": activations},
-    activation_names=["z_posterior"],
-    labels_dict=concepts,
-    probe_type="linear",
-)
-
-# Results
-for concept, result in sweep_result.results.items():
-    print(f"{concept}: accuracy={result.accuracy:.3f}")
-```
-
-### Interpreting Results
-
-| Accuracy | Interpretation |
-|----------|-----------------|
-| ~50% (random) | Activation doesn't encode this concept |
-| 60-75% | Weak encoding; information is present but diffuse |
-| 75-90% | Strong encoding; model explicitly uses this information |
-| >90% | Very strong; critical feature for the model |
-
-### Running It
+### How To Run
 
 ```bash
 python examples/02_probing.py
 ```
 
-Expected output:
-```
-[2] Training linear probes...
+### Expected Output
 
-[3] Probe Results:
-    reward_region: accuracy=0.642
-    novel_state: accuracy=0.578
-    high_value: accuracy=0.614
-```
+You should see per-concept accuracy values such as:
 
----
+- `reward_region: accuracy=...`
+- `novel_state: accuracy=...`
+- `high_value: accuracy=...`
+
+The exact numbers may vary with synthetic data, but the output should clearly show which concepts are easier or harder to decode from the chosen activation.
+
+### What To Inspect
+
+- which activation component is being probed
+- how labels are constructed
+- whether accuracies are meaningfully above chance
+- whether flattening / preprocessing changes probe performance
+
+### When To Use This Pattern
+
+Use probing when the question is: "What information is present in this representation?"
+
+### Common Failure Modes
+
+- labels do not align with the number of activation rows
+- highly imbalanced labels make accuracy misleading
+- strong probe performance is mistaken for causality rather than correlation
 
 ## Example 03: Activation Patching
 
 **File:** `examples/03_patching.py`
 
-**What it teaches:** How to perform causal intervention by patching activations between clean and corrupted runs.
+**What this example shows:** How to intervene on model internals by replacing corrupted activations with clean activations and measuring recovery.
 
-### What It Does
+### Prerequisites
 
-1. Creates a **clean run** with normal observations
-2. Creates a **corrupted run** (observations get noise at t=5)
-3. Patches activations from the clean run into the corrupted run
-4. Measures "recovery rate" — how much does patching help?
+- Comfort with cached runs from Example 01
+- Understanding of clean vs corrupted comparisons
 
-### Why Patching?
+### Modules Used
 
-Patching answers: **"Does this component causally affect the output?"**
+- `world_model_lens.patching.TemporalPatcher`
+- cached clean and corrupted runs
 
-If patching component X at timestep t recovers 70% of lost performance, that component was important at that time.
+Related API pages:
+- [patching.md](C:\Users\user\Desktop\WorldModelLens\docs\api\patching.md)
+- [core.md](C:\Users\user\Desktop\WorldModelLens\docs\api\core.md)
 
-### Code Walkthrough
-
-```python
-# Clean run (normal observations)
-clean_traj, clean_cache = wm.run_with_cache(obs_seq, action_seq)
-
-# Corrupted run (observations corrupted from t=5 onwards)
-obs_corrupted = obs_seq.clone()
-obs_corrupted[5:] = torch.randn_like(obs_corrupted[5:])
-corrupted_traj, corrupted_cache = wm.run_with_cache(obs_corrupted, action_seq)
-
-# Setup patcher
-patcher = TemporalPatcher(wm)
-
-# Full sweep: try patching each component at each timestep
-sweep_result = patcher.full_sweep(
-    clean_cache=clean_cache,
-    corrupted_cache=corrupted_cache,
-    components=["h", "z_posterior", "z_prior"],
-    metric_fn=lambda pred: pred.mean().item(),
-    t_range=[5, 6, 7, 8, 9],
-)
-
-# Find most important patches
-top_patches = sweep_result.top_k_patches(k=5)
-for patch in top_patches:
-    print(f"{patch.component}@t={patch.timestep}: recovery={patch.recovery_rate:.3f}")
-```
-
-### Understanding Recovery Rate
-
-**Recovery Rate** = (corrupted_metric - patched_metric) / (clean_metric - corrupted_metric)
-
-- `recovery=0`: Patching does nothing
-- `recovery=0.5`: Patching recovers 50% of lost performance
-- `recovery=1.0`: Patching fully restores performance (this component is critical)
-
-### Running It
+### How To Run
 
 ```bash
 python examples/03_patching.py
 ```
 
-Expected output:
-```
-[3] Top patches by recovery rate:
-    z_posterior@t=5: recovery=0.856
-    h@t=6: recovery=0.723
-    z_prior@t=7: recovery=0.591
-    ...
-```
+### Expected Output
 
----
+You should see recovery scores for components and timesteps, with a short ranked list of the most important patches.
+
+### What To Inspect
+
+- how the corrupted input is constructed
+- which components are patched
+- the metric used to score recovery
+- which timesteps dominate the top-k patch results
+
+### When To Use This Pattern
+
+Use patching when the question is: "Which component or timestep is causally responsible for the behavior difference?"
+
+### Common Failure Modes
+
+- clean and corrupted runs are not aligned in shape or length
+- the metric function is too noisy or too weak to distinguish effects
+- recovery rates are interpreted without comparing to the original corruption severity
 
 ## Example 04: Imagination Branching
 
 **File:** `examples/04_branching.py`
 
-**What it teaches:** How to fork from a real trajectory and explore counterfactual futures.
+**What this example shows:** How to fork a trajectory from a real state and compare multiple imagined futures.
 
-### What It Does
+### Prerequisites
 
-1. Records a real trajectory
-2. Finds a high-surprise timestep (where the model was uncertain)
-3. Branches from that point with 5 different action sequences
-4. Compares how the branches diverge
+- Comfort with `wm.imagine(...)`
+- Understanding of latent divergence metrics
 
-### Why Branching?
+### Modules Used
 
-Branching answers: **"What are plausible futures from here?"** and **"How certain is the model?"**
+- `world_model_lens.HookedWorldModel.imagine`
+- trajectory states from a recorded run
 
-If all branches stay close together, the model is confident. If they diverge quickly, the model sees uncertainty.
+Related API pages:
+- [branching.md](C:\Users\user\Desktop\WorldModelLens\docs\api\branching.md)
+- [core.md](C:\Users\user\Desktop\WorldModelLens\docs\api\core.md)
 
-### Code Walkthrough
-
-```python
-# Real trajectory
-real_traj, cache = wm.run_with_cache(obs_seq, action_seq)
-
-# Find high-surprise point (using KL divergence or your metric)
-kl_vals = np.random.rand(real_traj.length)  # In real cases, compute KL
-fork_at = int(np.argmax(kl_vals[5:])) + 5
-start_state = real_traj.states[fork_at]
-
-# Branch multiple times
-branches = []
-for _ in range(5):
-    actions = torch.randn(20, cfg.d_action)
-    imagined = wm.imagine(start_state=start_state, actions=actions)
-    branches.append(imagined)
-
-# Measure divergence
-ref_states = torch.stack([s.state for s in branches[0].states])
-for i, branch in enumerate(branches[1:], 1):
-    branch_states = torch.stack([s.state for s in branch.states])
-    divergence = (ref_states - branch_states).norm(dim=-1)
-    print(f"Branch 0 vs {i}: mean L2={divergence.mean():.4f}")
-```
-
-### Divergence Metrics
-
-| Metric | Interpretation |
-|--------|-----------------|
-| Small mean L2 | Branches stay similar (high confidence) |
-| Large mean L2 | Branches diverge quickly (high uncertainty) |
-| Increasing L2 over time | Compound uncertainty (typical) |
-| Stable L2 over time | System converges (attractor behavior) |
-
-### Running It
+### How To Run
 
 ```bash
 python examples/04_branching.py
 ```
 
-Expected output:
-```
-[5] Computing divergence between branches
-    Branch 0 vs 1: mean L2=0.0342, max L2=0.1289
-    Branch 0 vs 2: mean L2=0.0298, max L2=0.1156
-    Branch 0 vs 3: mean L2=0.0401, max L2=0.1523
-    Branch 0 vs 4: mean L2=0.0387, max L2=0.1478
-```
+### Expected Output
 
----
+You should see divergence statistics across multiple branches, usually reported as mean or max distances over time.
 
-## Comparing the Three Techniques
+### What To Inspect
 
-| Example | Question | Method | Output |
-|---------|----------|--------|--------|
-| **02: Probing** | What do activations encode? | Train classifier | Accuracy scores |
-| **03: Patching** | What causally affects output? | Replace → measure recovery | Recovery rates |
-| **04: Branching** | What are plausible futures? | Fork & compare | Divergence curves |
+- the choice of fork timestep
+- how action sequences are varied across branches
+- whether divergence grows, plateaus, or collapses
+- whether some branches remain clustered while others drift sharply
 
-All three are complementary:
-- **Probing** finds correlates
-- **Patching** finds causal components
-- **Branching** explores counterfactuals
+### When To Use This Pattern
 
-## Next Steps
+Use branching when the question is: "What futures does the model consider plausible from this state?"
 
-After these three examples, you'll be ready for advanced analysis in Example 05 (surprise & concepts) and Example 06 (disentanglement).
+### Common Failure Modes
+
+- branch comparisons use mismatched horizons
+- divergence is measured on incompatible state tensors
+- branch spread is over-interpreted without considering random action noise
+
+## Comparing The Three
+
+| Example | Main question | Signal type | Typical output |
+|---|---|---|---|
+| 02 | What is encoded? | Correlational | Probe accuracy |
+| 03 | What causes the effect? | Interventional | Recovery score |
+| 04 | What futures are plausible? | Counterfactual / rollout | Divergence curves |
+
+## Next Examples
+
+- [advanced-analysis.md](C:\Users\user\Desktop\WorldModelLens\docs\examples\advanced-analysis.md)
+- [causal-analysis.md](C:\Users\user\Desktop\WorldModelLens\docs\examples\causal-analysis.md)

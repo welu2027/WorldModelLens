@@ -1,244 +1,116 @@
 # Advanced Analysis
 
-These examples demonstrate high-level interpretability analyses built on top of the core techniques.
+These examples build on the basic cache and intervention workflows to answer higher-level questions about uncertainty, hallucination, saliency, and representation structure.
 
 ## Example 05: Belief Analysis
 
 **File:** `examples/05_belief_analysis.py`
 
-**What it teaches:** How to analyze model uncertainty, find important concepts, and detect hallucinations.
+**What this example shows:** How to inspect model confidence, detect hallucination-like divergence, and identify dimensions that matter for a target prediction.
 
-### What It Does
+### Prerequisites
 
-1. Computes **surprise timeline** — when was the model uncertain?
-2. Searches for **concept alignment** — which dimensions encode a concept?
-3. Computes **saliency maps** — which latents affect reward prediction?
-4. Detects **hallucinations** — where does imagination diverge from reality?
+- Comfort with Examples 01-04
+- Basic familiarity with surprise, saliency, and divergence metrics
 
-### Core Analyses
+### Modules Used
 
-#### 1. Surprise Timeline
+- `world_model_lens.analysis.BeliefAnalyzer`
+- cached trajectories and imagined trajectories
 
-Measures model confidence using KL divergence between prior and posterior.
+Related API pages:
+- [analysis.md](C:\Users\user\Desktop\WorldModelLens\docs\api\analysis.md)
+- [causal.md](C:\Users\user\Desktop\WorldModelLens\docs\api\causal.md)
 
-```python
-analyzer = BeliefAnalyzer(wm)
-surprise_result = analyzer.surprise_timeline(cache)
-
-print(f"Mean surprise: {surprise_result.mean_surprise:.4f}")
-print(f"Max surprise at t={surprise_result.max_surprise_timestep}")
-print(f"Peaks: {surprise_result.peaks}")  # Timesteps where model was most uncertain
-```
-
-**Interpretation:**
-- High surprise → Model encountered something unexpected
-- Surprise peaks → Important decision points or state transitions
-
-#### 2. Concept Search
-
-Find which latent dimensions best discriminate two groups of timesteps.
-
-```python
-concept_result = analyzer.concept_search(
-    concept_name="early_vs_late",
-    positive_timesteps=[0, 1, 2, 3, 4],    # Early times
-    negative_timesteps=[10, 11, 12, 13, 14],  # Late times
-    cache=cache,
-    component="z_posterior",
-)
-
-print(f"Top dims: {concept_result.top_dims[:5]}")
-```
-
-**Interpretation:**
-- `top_dims` = latent dimensions that differ most between the two groups
-- Use this to understand how the model structures state
-
-#### 3. Saliency Maps
-
-Compute gradients to find which latents causally affect a target (e.g., reward prediction).
-
-```python
-saliency_result = analyzer.latent_saliency(
-    traj=traj,
-    cache=cache,
-    timestep=5,
-    target="reward_pred",  # Compute gradients w.r.t. reward
-)
-
-print(f"h_saliency shape: {saliency_result.h_saliency.shape}")  # Gradients of h
-print(f"z_saliency shape: {saliency_result.z_saliency.shape}")  # Gradients of z
-```
-
-**Interpretation:**
-- High saliency values = strong causal effect on target
-- Use to identify which parts of the state matter for a given output
-
-#### 4. Hallucination Detection
-
-Compare imagined vs. real trajectories to find where the model's imagination diverges.
-
-```python
-imagined = wm.imagine(start_state=traj.states[0], horizon=20)
-
-hallucination_result = analyzer.detect_hallucinations(
-    real_traj=traj,
-    imagined_traj=imagined,
-    method="latent_distance",
-    threshold=0.5,
-)
-
-print(f"Severity score: {hallucination_result.severity_score:.4f}")
-print(f"Hallucination timesteps: {hallucination_result.hallucination_timesteps}")
-```
-
-**Interpretation:**
-- `severity_score` = overall divergence magnitude
-- `hallucination_timesteps` = where imagination diverged most
-
-### Running It
+### How To Run
 
 ```bash
 python examples/05_belief_analysis.py
 ```
 
-Expected output:
-```
-[2] Computing surprise timeline...
-    Mean surprise: 0.2847
-    Max surprise at t=8
-    Peak count: 3
+### Expected Output
 
-[3] Searching for concept alignment...
-    Top dims: [12, 3, 7, 19, 11]
-    Method: activation_difference
+You should see:
 
-[4] Computing saliency...
-    h_saliency shape: torch.Size([128])
-    z_saliency shape: torch.Size([16, 32])
+- mean and peak surprise statistics
+- top dimensions from concept search
+- saliency tensor shapes
+- hallucination severity and flagged timesteps
 
-[5] Detecting hallucinations...
-    Severity score: 0.3142
-    Hallucination timesteps: [4, 5, 6]
-```
+### What To Inspect
 
----
+- timesteps where surprise peaks
+- whether concept search separates the chosen timestep groups meaningfully
+- whether saliency mass is concentrated or diffuse
+- whether hallucination detection finds early drift or late drift
+
+### When To Use This Pattern
+
+Use belief analysis when the question is: "Where is the model uncertain, brittle, or internally inconsistent?"
+
+### Common Failure Modes
+
+- surprise peaks are treated as errors rather than candidates for inspection
+- concept labels are poorly defined and produce noisy dimension rankings
+- hallucination thresholds are chosen without calibrating on baseline trajectories
 
 ## Example 06: Disentanglement Analysis
 
 **File:** `examples/06_disentanglement.py`
 
-**What it teaches:** How to measure whether a latent representation separates different factors of variation.
+**What this example shows:** How to measure whether latent dimensions separate different factors of variation.
 
-### What It Does
+### Prerequisites
 
-1. Creates synthetic **factors** (speed, direction, reward level)
-2. Computes disentanglement metrics (**MIG**, **DCI**, **SAP**)
-3. Assigns each factor to latent dimensions
-4. Reports overall disentanglement score
+- Comfort with Example 02 style label construction
+- Familiarity with MIG, DCI, and SAP as factor-structure metrics
 
-### Why Disentanglement?
+### Modules Used
 
-A disentangled representation has:
-- One dimension per concept
-- Minimal redundancy
-- Interpretability (you can identify what each dimension encodes)
+- `world_model_lens.analysis.BeliefAnalyzer`
+- disentanglement scoring utilities inside the analysis package
 
-### Disentanglement Metrics
+Related API pages:
+- [analysis.md](C:\Users\user\Desktop\WorldModelLens\docs\api\analysis.md)
+- [probing.md](C:\Users\user\Desktop\WorldModelLens\docs\api\probing.md)
 
-#### MIG (Mutual Information Gap)
-
-Measures if each factor is encoded in a unique dimension.
-
-- `MIG=0`: No disentanglement
-- `MIG=1`: Perfect disentanglement
-
-#### DCI (Disentangled Components)
-
-Measures how separated factors are across dimensions.
-
-- Includes: explicitness (how predictable each dimension from one factor) and completeness (how many dimensions each factor uses)
-
-#### SAP (Separated Attribute Predictability)
-
-Another measure of factor-dimension alignment.
-
-- `SAP=0`: Random alignment
-- `SAP=1`: Each factor in one dimension
-
-### Code Walkthrough
-
-```python
-# Create synthetic factors
-factors = {
-    "speed": torch.tensor([float(i % 10) / 10 for i in range(50)]),
-    "direction": torch.tensor([float((i * 7) % 10) / 10 for i in range(50)]),
-    "reward_level": torch.tensor([1.0 if i < 25 else 0.0 for i in range(50)]),
-}
-
-# Compute disentanglement
-disentanglement_result = analyzer.disentanglement_score(
-    cache=cache,
-    factors=factors,
-    metrics=["MIG", "DCI", "SAP"],
-    component="z_posterior",
-)
-
-# Results
-print(f"MIG: {disentanglement_result.scores['MIG']:.4f}")
-print(f"DCI: {disentanglement_result.scores['DCI']:.4f}")
-print(f"SAP: {disentanglement_result.scores['SAP']:.4f}")
-
-# See which dimensions encode which factors
-for factor, dims in disentanglement_result.factor_dim_assignment.items():
-    print(f"{factor}: dims {dims[:5]}")
-```
-
-### Interpreting Results
-
-| Score | Meaning |
-|-------|---------|
-| 0.0–0.3 | Low disentanglement; factors are mixed |
-| 0.3–0.6 | Moderate disentanglement; some structure |
-| 0.6–0.8 | Good disentanglement; clear separation |
-| 0.8–1.0 | Excellent; each factor in isolated dimensions |
-
-### Running It
+### How To Run
 
 ```bash
 python examples/06_disentanglement.py
 ```
 
-Expected output:
-```
-[3] Computing disentanglement metrics...
-    MIG score: 0.3214
-    DCI score: 0.4567
-    SAP score: 0.3891
-    Total score: 0.3891
+### Expected Output
 
-[4] Factor assignments:
-    speed: dims [3, 7, 11, 12, 15]...
-    direction: dims [1, 8, 14, 2, 9]...
-    reward_level: dims [4, 6, 10, 0, 13]...
-```
+You should see MIG, DCI, and SAP scores plus a mapping from factors to the most associated dimensions.
 
----
+### What To Inspect
 
-## Combining the Two Advanced Examples
+- whether all factors have some assigned dimensions
+- whether one factor dominates many dimensions
+- whether scores agree with the qualitative behavior of the model
+- whether changes in factor construction alter the ranking substantially
 
-| Example | Concept | Metric | Use Case |
-|---------|---------|--------|----------|
-| **05: Belief** | Model confidence | Surprise timeline | When is the model uncertain? |
-| **05: Belief** | Saliency | Gradient importance | Which states matter? |
-| **05: Belief** | Hallucination | Divergence detection | Where does imagination fail? |
-| **06: Disent.** | Factor structure | MIG/DCI/SAP scores | Is representation organized? |
-| **06: Disent.** | Alignment | Factor-to-dimension mapping | Which dimension = which factor? |
+### When To Use This Pattern
 
-## Next Steps
+Use disentanglement analysis when the question is: "Is the representation organized into stable, interpretable factors?"
 
-After these two examples:
-- Example 07-09 show these techniques apply to **any world model type**
-- Example 10 shows **counterfactual engines** for systematic intervention
+### Common Failure Modes
 
-You now understand both **what** the model learns (disentanglement) and **when** it's uncertain (belief analysis).
+- synthetic factors do not correspond to anything meaningful in the trajectory
+- high scores are over-trusted without qualitative checks
+- factor scaling or binning choices distort the metric values
+
+## Interpretation Guide
+
+| Signal | What a high value usually means | Follow-up |
+|---|---|---|
+| Surprise | The model encountered something unexpected | Inspect the underlying state transition |
+| Hallucination severity | Imagination diverges sharply from reality | Compare rollout segments before and after divergence |
+| Saliency magnitude | Small set of dimensions strongly affects the target | Patch or ablate those dimensions next |
+| MIG / DCI / SAP | Factors are more cleanly separated | Validate with probing or interventions |
+
+## Next Examples
+
+- [non-rl-models.md](C:\Users\user\Desktop\WorldModelLens\docs\examples\non-rl-models.md)
+- [causal-analysis.md](C:\Users\user\Desktop\WorldModelLens\docs\examples\causal-analysis.md)

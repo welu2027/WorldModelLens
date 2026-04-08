@@ -1,25 +1,35 @@
 # Examples
 
-World Model Lens includes 10 comprehensive examples demonstrating core interpretability techniques, from quickstart to advanced causal analysis. All examples are self-contained and can be run independently.
+World Model Lens includes 10 example scripts covering the main workflows: collecting activations, probing representations, patching components, branching imagined futures, and running causal comparisons.
+
+## How To Use This Section
+
+Use the examples in sequence if you are new to the library:
+
+1. Start with Example 01 for the basic wrapper + cache workflow.
+2. Move to Examples 02-04 for the core interpretability techniques.
+3. Continue to Examples 05-06 for higher-level analyses.
+4. Use Examples 07-09 if you care about non-RL architectures.
+5. Finish with Example 10 for systematic counterfactual workflows.
 
 ## Running Examples
 
-All examples are located in the `examples/` directory. Run any example with:
+All examples live in the `examples/` directory.
 
 ```bash
 python examples/01_quickstart.py
 python examples/02_probing.py
-# ... etc
+python examples/10_causal_engine.py
 ```
 
-Or from the repo root:
+From the `examples/` directory itself:
 
 ```bash
 cd examples
 python 01_quickstart.py
 ```
 
-## Example Categories
+## Example Guides
 
 ```{toctree}
 :maxdepth: 2
@@ -31,157 +41,89 @@ examples/non-rl-models
 examples/causal-analysis
 ```
 
----
+## Example Index
 
-## Quick Reference
+| Example | File | Topic | Difficulty | Extras | Key modules | Expected output |
+|---|---|---|---|---|---|---|
+| 01 | `examples/01_quickstart.py` | Basic cache workflow | Beginner | None | `HookedWorldModel`, `DreamerV3Adapter` | Trajectory length, cache keys, sample activation shapes |
+| 02 | `examples/02_probing.py` | Linear probing | Beginner | None | `LatentProber` | Probe accuracies by concept |
+| 03 | `examples/03_patching.py` | Activation patching | Intermediate | None | `TemporalPatcher` | Recovery scores by component and timestep |
+| 04 | `examples/04_branching.py` | Imagination branching | Intermediate | None | `HookedWorldModel.imagine` | Divergence statistics across branches |
+| 05 | `examples/05_belief_analysis.py` | Surprise, saliency, hallucination | Intermediate | None | `BeliefAnalyzer` | Surprise peaks, top dimensions, saliency shapes |
+| 06 | `examples/06_disentanglement.py` | Factor structure | Intermediate | None | `BeliefAnalyzer` | MIG, DCI, SAP, factor-to-dimension assignments |
+| 07 | `examples/07_video_model.py` | Video prediction | Intermediate | None | `VideoWorldModelAdapter` | Cache contents for frame prediction |
+| 08 | `examples/08_toy_video_world_model.py` | Geometry and memory | Intermediate | None | `GeometryAnalyzer`, `TemporalMemoryProber` | PCA, trajectory metrics, memory retention |
+| 09 | `examples/09_toy_scientific_dynamics.py` | Scientific dynamics | Intermediate | None | `ToyScientificAdapter`, geometry + belief tools | Surprise and geometry comparisons across systems |
+| 10 | `examples/10_causal_engine.py` | Counterfactual engine | Advanced | None | `CounterfactualEngine`, `Intervention` | Intervention tables and divergence metrics |
 
-| Example | Focus | Key Concept |
-|---------|-------|-------------|
-| 01 | Quickstart | Basic workflow: cache → probe |
-| 02 | Linear Probing | Train probes on activations |
-| 03 | Activation Patching | Causal intervention via patching |
-| 04 | Imagination Branching | Fork & compare imagined futures |
-| 05 | Belief Analysis | Surprise, saliency, concepts |
-| 06 | Disentanglement | Analyze factor representations |
-| 07 | Video Model | Non-RL video prediction model |
-| 08 | Toy Video Analysis | Video model with geometry & memory |
-| 09 | Toy Scientific Dynamics | Scientific model (Lorenz, pendulum) |
-| 10 | Counterfactual Engine | Interventions & branch trees |
+## Suggested Paths
 
-## What Each Example Teaches
+### New to World Model Lens
 
-### Core Workflow
-**Example 01** shows the essential pattern used by all examples: create → run with cache → extract results.
+- Example 01: basic wrapping and caching
+- Example 02: first inspection task
+- Example 03: first causal intervention
 
-### Interpretability Techniques
-**Examples 02-06** cover the main interpretability methods:
-- Probing: What do activations encode?
-- Patching: What causes outputs?
-- Branching: What if we changed this state?
-- Analysis: When does the model surprise? What factors matter?
+### Interested In Causal Analysis
 
-### Model Diversity
-**Examples 07-09** prove World Model Lens works with **any** world model architecture:
-- RL agents (DreamerV3)
-- Video prediction (no actions, no rewards)
-- Scientific dynamics (pure latent dynamics)
+- Example 03: patching
+- Example 04: branching
+- Example 10: counterfactual engine
 
-### Causal Reasoning
-**Example 10** demonstrates advanced counterfactual analysis:
-- Single interventions
-- Branch trees
-- Systematic comparison
+### Interested In Non-RL Models
 
-## Prerequisites
+- Example 07: video prediction
+- Example 08: toy video analysis
+- Example 09: scientific dynamics
 
-All examples require:
+### Interested In Safety / Reliability Questions
 
-```bash
-pip install world_model_lens
-```
+- Example 05: surprise, saliency, hallucination
+- Example 10: intervention comparison and divergence tracing
 
-Optional for visualization/analysis features:
+## Common Patterns Across Examples
 
-```bash
-pip install world_model_lens[viz,dev]
-```
-
-## Common Patterns
-
-### Pattern 1: Forward Pass with Caching
+### Forward pass with activation caching
 
 ```python
-from world_model_lens import HookedWorldModel, WorldModelConfig
-from world_model_lens.backends.dreamerv3 import DreamerV3Adapter
-
-cfg = WorldModelConfig(...)
-adapter = DreamerV3Adapter(cfg)
-wm = HookedWorldModel(adapter=adapter, config=cfg)
-
-# Run and collect all activations
 traj, cache = wm.run_with_cache(obs_seq, action_seq)
-
-# Access cached activations
-h_t = cache["h", 0]  # Hidden state at t=0
-z_posterior = cache["z_posterior", 0]
+h_t = cache["h", 0]
+z_t = cache["z_posterior", 0]
 ```
 
-### Pattern 2: Imagination (Rollout)
+### Imagination from an existing state
 
 ```python
-# Continue from a real state
 imagined = wm.imagine(start_state=traj.states[5], horizon=20)
-
-# Or with specific actions
-actions = torch.randn(20, cfg.d_action)
-imagined = wm.imagine(start_state=traj.states[5], actions=actions, horizon=20)
 ```
 
-### Pattern 3: Analysis with Belief Analyzer
+### Analysis after collection
 
 ```python
-from world_model_lens.analysis.belief_analyzer import BeliefAnalyzer
-
 analyzer = BeliefAnalyzer(wm)
-
-# Get surprise timeline
 surprise = analyzer.surprise_timeline(cache)
-
-# Find concepts
-concepts = analyzer.concept_search(
-    concept_name="early_vs_late",
-    positive_timesteps=[0, 1, 2],
-    negative_timesteps=[10, 11, 12],
-    cache=cache
-)
 ```
 
-## Troubleshooting Examples
+## Troubleshooting
 
-### Import Error: `ModuleNotFoundError: No module named 'world_model_lens'`
+### `ModuleNotFoundError: No module named 'world_model_lens'`
 
-Ensure you've installed the package:
+Install the package from the repo root:
 
 ```bash
-pip install -e .  # From repo root
-# or
-pip install world_model_lens  # From PyPI
+pip install -e .
 ```
 
-### CUDA Out of Memory
+### CUDA / memory issues
 
-Reduce tensor sizes in examples:
+Reduce batch size, number of timesteps, latent dimension, or image resolution in the example inputs.
 
-```python
-# Instead of:
-obs_seq = torch.randn(100, 3, 64, 64)
-# Use:
-obs_seq = torch.randn(20, 3, 64, 64)
-```
+### Outputs differ from the docs
 
-### Print Output Too Verbose
+Most examples use synthetic/random data. Shapes and workflow should match; exact metric values may vary.
 
-Examples are designed to print progress. To suppress:
+## Related Docs
 
-```python
-import sys
-sys.stdout = open('/dev/null', 'w')  # Linux/Mac
-# Then run example...
-```
-
-Or just redirect stdout when running:
-
-```bash
-python examples/01_quickstart.py > /dev/null 2>&1
-```
-
-## Next Steps
-
-After exploring these examples:
-
-1. **Read the API docs** — Understand the full API surface
-2. **Build your own** — Use these as templates for your models
-3. **Integrate with your model** — Create a custom adapter for your world model
-4. **Share results** — Contribute new examples or analysis tools!
-
-See [Getting Started](getting-started.md) for a guided walkthrough.
+- [Getting Started](C:\Users\user\Desktop\WorldModelLens\docs\getting-started.md)
+- [API Index](C:\Users\user\Desktop\WorldModelLens\docs\api\index.md)
+- [Glossary](C:\Users\user\Desktop\WorldModelLens\docs\glossary.md)
