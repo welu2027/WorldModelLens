@@ -12,6 +12,11 @@ A storage mechanism that captures intermediate activations during a forward pass
 cache = ActivationCache()
 cache["z_posterior", 0] = tensor  # Store latent at t=0
 latent = cache["z_posterior", 0]  # Retrieve it
+
+# New: Store distributions for uncertainty analysis
+import torch.distributions as dist
+cache["z_posterior", 0] = dist.Normal(mean, std)
+params = cache.get_distribution_params("z_posterior", 0)  # {"mean": ..., "std": ..., "variance": ...}
 ```
 
 ### Hook Point

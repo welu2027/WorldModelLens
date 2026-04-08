@@ -186,6 +186,11 @@ traj, cache = wm.run_with_cache(observations=observations)
 # Inspect any activation at any timestep
 h_t = cache["h", 5]  # hidden state at timestep 5
 z_t = cache["z_posterior", 5]  # latent at timestep 5
+
+# New: Store distributions for uncertainty analysis
+import torch.distributions as dist
+cache["z_posterior", 5] = dist.Normal(mean, std)
+params = cache.get_distribution_params("z_posterior", 5)  # {"mean": ..., "std": ..., "variance": ...}
 ```
 
 ### 3. Replay & Debug
