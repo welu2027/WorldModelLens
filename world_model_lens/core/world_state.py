@@ -26,6 +26,16 @@ import torch
 
 
 @dataclass
+class ActionSource:
+    """Describes the source and type of an action for causality analysis."""
+
+    source_type: str  # "policy_sampled", "externally_provided", "forced", "none"
+    policy_logits: Optional[torch.Tensor] = None  # Raw policy outputs if available
+    temperature: Optional[float] = None  # Sampling temperature if applicable
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class WorldState:
     """Generic world state representation.
 
@@ -45,6 +55,7 @@ class WorldState:
         state: The core latent state tensor [d_state]
         timestep: Current timestep index
         action: Optional action taken [d_action]
+        action_source: Optional ActionSource describing how action was determined
         reward: Optional reward received (can be scalar or distribution)
         reward_pred: Optional predicted reward
         value: Optional value estimate
@@ -57,6 +68,7 @@ class WorldState:
     state: torch.Tensor
     timestep: int = 0
     action: Optional[torch.Tensor] = None
+    action_source: Optional[ActionSource] = None
     reward: Optional[torch.Tensor] = None
     reward_pred: Optional[torch.Tensor] = None
     value: Optional[torch.Tensor] = None
@@ -116,6 +128,14 @@ class WorldState:
             val = getattr(self, attr)
             if isinstance(val, torch.Tensor):
                 setattr(new_state, attr, val.to(device))
+
+        # Handle action_source tensors
+        if self.action_source is not None:
+            new_action_source = copy.copy(self.action_source)
+            if self.action_source.policy_logits is not None:
+                new_action_source.policy_logits = self.action_source.policy_logits.to(device)
+            new_state.action_source = new_action_source
+
         return new_state
 
     def detach(self) -> "WorldState":
@@ -136,6 +156,14 @@ class WorldState:
             val = getattr(self, attr)
             if isinstance(val, torch.Tensor):
                 setattr(new_state, attr, val.detach())
+
+        # Handle action_source tensors
+        if self.action_source is not None:
+            new_action_source = copy.copy(self.action_source)
+            if self.action_source.policy_logits is not None:
+                new_action_source.policy_logits = self.action_source.policy_logits.detach()
+            new_state.action_source = new_action_source
+
         return new_state
 
     def to_dict(self) -> Dict[str, Any]:

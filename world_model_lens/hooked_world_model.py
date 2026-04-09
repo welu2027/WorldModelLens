@@ -389,11 +389,35 @@ class HookedWorldModel:
             )
             state = next_state.squeeze(0)
 
+            # Apply transition hook for causality analysis
+            transition_ctx = HookContext(
+                timestep=t,
+                component="transition",
+                trajectory_so_far=states,
+                metadata={
+                    "s_t": state.clone(),  # Current state after transition
+                    "s_prev": states[-1].state if states else None,  # Previous state
+                    "a_t": action_for_transition,  # Action used
+                    "z_t": posterior,  # Latent encoding
+                },
+            )
+            state = self._hooks.apply("transition", t, state, transition_ctx)
+
             action_for_state = action.clone() if action is not None else None
+            action_source = None
+            if action_for_state is not None:
+                from world_model_lens.core.world_state import ActionSource
+
+                action_source = ActionSource(
+                    source_type="externally_provided",
+                    temperature=None,
+                )
+
             state_obj = WorldState(
                 state=state.clone(),
                 timestep=t,
                 action=action_for_state,
+                action_source=action_source,
                 reward_pred=reward_pred.squeeze(0).clone() if reward_pred is not None else None,
                 value_pred=value_pred.squeeze(0).clone() if value_pred is not None else None,
                 obs_encoding=obs_encoding.clone() if obs_encoding is not None else None,
@@ -475,8 +499,49 @@ class HookedWorldModel:
 
         for t in range(horizon):
             action = None
-            if caps.uses_actions and actions is not None and t < len(actions):
-                action = actions[t]
+            action_source = None
+
+            if caps.uses_actions:
+                if actions is not None and t < len(actions):
+                    # Externally provided action
+                    action = actions[t]
+                    from world_model_lens.core.world_state import ActionSource
+
+                    action_source = ActionSource(
+                        source_type="externally_provided",
+                        temperature=None,
+                    )
+                elif caps.has_actor:
+                    # Sample action from policy
+                    try:
+                        policy_logits = self.adapter.actor_forward(
+                            state.unsqueeze(0) if state.dim() == 1 else state,
+                            z.unsqueeze(0) if z.dim() == 1 else z,
+                        )
+                        if policy_logits is not None:
+                            # Sample action from policy
+                            if policy_logits.dim() > 2:
+                                policy_logits = policy_logits.squeeze(0)
+
+                            # Handle different action distributions
+                            if policy_logits.shape[-1] == 1:
+                                # Continuous action
+                                action = torch.tanh(policy_logits)  # Assuming tanh squashing
+                            else:
+                                # Discrete action
+                                probs = torch.softmax(policy_logits / temperature, dim=-1)
+                                action_idx = torch.multinomial(probs, 1).item()
+                                action = torch.tensor([action_idx], dtype=torch.long)
+
+                            from world_model_lens.core.world_state import ActionSource
+
+                            action_source = ActionSource(
+                                source_type="policy_sampled",
+                                policy_logits=policy_logits.detach(),
+                                temperature=temperature,
+                            )
+                    except NotImplementedError:
+                        pass
 
             prior = self.adapter.dynamics(
                 state.unsqueeze(0) if state.dim() == 1 else state,
@@ -486,7 +551,24 @@ class HookedWorldModel:
             else:
                 z = prior.squeeze(0) if prior.dim() == 1 else prior
 
+            prev_state = state.clone()
             state = self._call_transition(state, z, action)
+
+            # Apply transition hook for causality analysis
+            transition_ctx = HookContext(
+                timestep=t + start_state.timestep + 1,
+                component="transition",
+                trajectory_so_far=states,
+                metadata={
+                    "s_t": state.clone(),  # Current state after transition
+                    "s_prev": prev_state,  # Previous state
+                    "a_t": action,  # Action used
+                    "z_t": z,  # Latent encoding
+                },
+            )
+            state = self._hooks.apply(
+                "transition", t + start_state.timestep + 1, state, transition_ctx
+            )
 
             reward_pred = None
             if caps.has_reward_head and t > 0:
@@ -500,6 +582,7 @@ class HookedWorldModel:
                 state=state.clone(),
                 timestep=t + start_state.timestep + 1,
                 action=action.clone() if action is not None else None,
+                action_source=action_source,
                 reward_pred=reward_pred,
             )
             states.append(state_obj)
