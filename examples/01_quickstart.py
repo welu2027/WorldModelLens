@@ -9,6 +9,7 @@ This example demonstrates the basic workflow:
 
 import numpy as np
 import torch
+from world_model_lens.visualizations import CacheSignalPlotter
 
 from world_model_lens import HookedWorldModel, WorldModelConfig
 from world_model_lens.backends.dreamerv3 import DreamerV3Adapter
@@ -49,6 +50,11 @@ def main():
     print(f"\n[6] Sample activations:")
     print(f"    h_t shape: {h_t.shape}")
     print(f"    z_posterior shape: {z_posterior.shape}")
+
+    print("Using the viz lib to plot stuff")
+
+    cache_plotter: CacheSignalPlotter = CacheSignalPlotter(cache)
+    cache_plotter.plot_reward_timeline()
 
     imagined = wm.imagine(start_state=traj.states[5], horizon=20)
     print(f"\n[7] Imagination complete: {imagined.length} steps")

@@ -1,6 +1,7 @@
+from typing import Any, Dict
+
 import numpy as np
 import torch
-from typing import Any, Dict
 
 
 class CacheSignalPlotter:
@@ -25,29 +26,15 @@ class CacheSignalPlotter:
         if hasattr(cache, "surprise"):
             try:
                 surprises = cache.surprise()
-                if isinstance(surprises, dict):
-                    # Old API: dict[int, torch.Tensor]
-                    timesteps = np.array(sorted(surprises.keys()))
-                    kl_values = np.array(
-                        [
-                            surprises[t].item()
-                            if isinstance(surprises[t], torch.Tensor)
-                            else float(surprises[t])
-                            for t in timesteps
-                        ]
-                    )
-                elif isinstance(surprises, torch.Tensor):
-                    # New API: torch.Tensor of shape [T]
-                    # Get timesteps from z_posterior keys
-                    timesteps = sorted({t for n, t in cache._store.keys() if n == "z_posterior"})
-                    if len(timesteps) != len(surprises):
-                        raise ValueError(
-                            f"Mismatch: {len(timesteps)} timesteps but {len(surprises)} surprise values"
-                        )
-                    kl_values = surprises.detach().cpu().numpy()
-                    timesteps = np.array(timesteps)
-                else:
-                    raise ValueError(f"Unexpected surprise type: {type(surprises)}")
+                timesteps = np.array(sorted(surprises.keys()))
+                kl_values = np.array(
+                    [
+                        surprises[t].item()
+                        if isinstance(surprises[t], torch.Tensor)
+                        else float(surprises[t])
+                        for t in timesteps
+                    ]
+                )
                 return {"timesteps": timesteps, "kl_values": kl_values}
             except (KeyError, AttributeError, ValueError):
                 pass
@@ -74,7 +61,7 @@ class CacheSignalPlotter:
         for i, state in enumerate(trajectory.states):
             timesteps.append(i)
             r_pred = state.reward_pred
-            r_real = state.reward_real
+            r_real = state.reward
 
             if r_pred is not None:
                 predicted.append(
