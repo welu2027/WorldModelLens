@@ -176,7 +176,7 @@ def main():
     ax.legend(fontsize=8)
 
     plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "causal_engine_dashboard.png", dpi=120, bbox_inches="tight")
+    plt.savefig(OUTPUT_DIR / "causal_engine_dashboard.png", dpi=80, bbox_inches="tight")
     print("    Saved causal_engine_dashboard.png")
     plt.show()
 
