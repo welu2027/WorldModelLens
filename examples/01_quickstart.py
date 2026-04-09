@@ -61,11 +61,6 @@ def main():
     print(f"    h_t shape: {h_t.shape}")
     print(f"    z_posterior shape: {z_posterior.shape}")
 
-    print("Using the viz lib to plot stuff")
-
-    reward_data = CacheSignalPlotter.plot_reward_timeline(traj)
-    print(f"    Reward timeline timesteps: {reward_data['timesteps']}")
-
     imagined = wm.imagine(start_state=traj.states[5], horizon=20)
     print(f"\n[7] Imagination complete: {imagined.length} steps")
 

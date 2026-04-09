@@ -61,7 +61,7 @@ class CacheSignalPlotter:
         for i, state in enumerate(trajectory.states):
             timesteps.append(i)
             r_pred = state.reward_pred
-            r_real = state.reward_real
+            r_real = getattr(state, "reward_real", None) or getattr(state, "reward", None)
 
             if r_pred is not None:
                 predicted.append(
