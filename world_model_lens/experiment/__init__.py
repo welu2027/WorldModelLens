@@ -371,10 +371,11 @@ class ExperimentLogger:
     ) -> None:
         if self.log_dir:
             cache_path = os.path.join(self.log_dir, f"{name}.pt")
-            cache_data = {
-                key: (val if isinstance(val, torch.Tensor) else None)
-                for key, val in cache._store.items()
-            }
+            cache_data = {}
+            for name_k in cache.component_names:
+                for t in cache.timesteps:
+                    val = cache.get(name_k, t, None)
+                    cache_data[(name_k, t)] = val if isinstance(val, torch.Tensor) else None
             torch.save(cache_data, cache_path)
             self.tracker.log_artifact(name, cache_path)
 

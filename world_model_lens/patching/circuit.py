@@ -287,12 +287,14 @@ class CircuitDiscovery:
             test_cache = ActivationCache()
             for c in components:
                 for t in cache.timesteps:
-                    if c in cache._store:
-                        test_cache[c, t] = cache[c, t].to(self.device)
+                    val = cache.get(c, t, None)
+                    if val is not None:
+                        test_cache[c, t] = val.to(self.device)
 
             for t in cache.timesteps:
-                if comp in cache._store:
-                    test_cache[comp, t] = torch.zeros_like(cache[comp, t]).to(self.device)
+                val = cache.get(comp, t, None)
+                if val is not None:
+                    test_cache[comp, t] = torch.zeros_like(val).to(self.device)
 
             metric_without = metric_fn(test_cache)
             importance = (clean_metric - metric_without) / (clean_metric + 1e-8)
@@ -552,11 +554,12 @@ def compute_lesion_effect(
     lesioned_cache = ActivationCache()
     for comp in cache.component_names:
         for t in cache.timesteps:
-            if comp in cache._store:
+            val = cache.get(comp, t, None)
+            if val is not None:
                 if comp == component:
-                    lesioned_cache[comp, t] = torch.zeros_like(cache[comp, t])
+                    lesioned_cache[comp, t] = torch.zeros_like(val)
                 else:
-                    lesioned_cache[comp, t] = cache[comp, t].clone()
+                    lesioned_cache[comp, t] = val.clone()
 
     lesioned_metric = metric_fn(lesioned_cache)
 

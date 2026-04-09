@@ -150,6 +150,28 @@ class ActivationCache:
         self._store[key] = value
         self._evaluated.pop(key, None)
 
+    def store(self, name: str, timestep: int, value: torch.Tensor) -> None:
+        """Public helper to store a concrete tensor for (name, timestep)."""
+        self[name, timestep] = value
+
+    def set_prior_equivalent(
+        self,
+        timestep: int,
+        logits: torch.Tensor,
+        probs: torch.Tensor,
+        names_filter: list[str] | None = None,
+    ) -> None:
+        """Store prior-equivalent entries for timestep when posterior==prior.
+
+        Writes both ``z_prior.logits`` and ``z_prior`` for convenience. If
+        *names_filter* is provided, only writes components present in the
+        filter.
+        """
+        if names_filter is None or "z_prior.logits" in names_filter:
+            self["z_prior.logits", timestep] = logits
+        if names_filter is None or "z_prior" in names_filter:
+            self["z_prior", timestep] = probs
+
     def __contains__(self, key: tuple[str, int]) -> bool:
         """Check if a key exists in the cache."""
         return key in self._store or key in self._evaluated
@@ -463,6 +485,24 @@ class ActivationCache:
                     self._get_single(name, t)
 
         return self
+
+    def set_prior_equivalent(
+        self,
+        timestep: int,
+        logits: torch.Tensor,
+        probs: torch.Tensor,
+        names_filter: list[str] | None = None,
+    ) -> None:
+        """Store prior-equivalent entries for timestep when posterior==prior.
+
+        Writes both ``z_prior.logits`` and ``z_prior`` for convenience. If
+        *names_filter* is provided, only writes components present in the
+        filter.
+        """
+        if names_filter is None or "z_prior.logits" in names_filter:
+            self["z_prior.logits", timestep] = logits
+        if names_filter is None or "z_prior" in names_filter:
+            self["z_prior", timestep] = probs
 
     def get_distribution_params(self, name: str, timestep: int) -> dict[str, Any]:
         """Get distribution parameters for uncertainty analysis.

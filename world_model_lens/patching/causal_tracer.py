@@ -135,16 +135,18 @@ class CausalTracer:
         corrupted_cache = ActivationCache()
         for comp in cache.component_names:
             for t in cache.timesteps:
-                if comp in cache._store:
-                    original = cache[comp, t].to(self.device)
+                val = cache.get(comp, t, None)
+                if val is not None:
+                    original = val.to(self.device)
                     noise = torch.randn_like(original) * 0.5
                     corrupted_cache[comp, t] = original + noise
 
         corrupted_metric = metric_fn(corrupted_cache)
 
         for t in cache.timesteps:
-            if source_component in cache._store:
-                corrupted_cache[source_component, t] = cache[source_component, t].to(self.device)
+            val = cache.get(source_component, t, None)
+            if val is not None:
+                corrupted_cache[source_component, t] = val.to(self.device)
 
         source_restored_metric = metric_fn(corrupted_cache)
 
@@ -242,8 +244,9 @@ class CausalTracer:
         corrupted_cache = ActivationCache()
         for comp in components:
             for t in cache.timesteps:
-                if comp in cache._store:
-                    original = cache[comp, t].to(self.device)
+                val = cache.get(comp, t, None)
+                if val is not None:
+                    original = val.to(self.device)
                     noise = torch.randn_like(original) * 0.5
                     corrupted_cache[comp, t] = original + noise
 
@@ -268,11 +271,14 @@ class CausalTracer:
             test_cache = ActivationCache()
             for c in components:
                 for t in cache.timesteps:
-                    if c in cache._store:
+                    val = cache.get(c, t, None)
+                    if val is not None:
                         if c == comp:
-                            test_cache[c, t] = cache[c, t].to(self.device)
+                            test_cache[c, t] = val.to(self.device)
                         else:
-                            test_cache[c, t] = corrupted_cache[c, t]
+                            corrupted_val = corrupted_cache.get(c, t, None)
+                            if corrupted_val is not None:
+                                test_cache[c, t] = corrupted_val
 
             restored_metric = target_metric_fn(test_cache)
             effect = (restored_metric - corrupted_metric) / (clean_metric - corrupted_metric)
@@ -342,8 +348,9 @@ class CausalTracer:
         corrupted_cache = ActivationCache()
         for comp in components:
             for t in cache.timesteps:
-                if comp in cache._store:
-                    original = cache[comp, t].to(self.device)
+                val = cache.get(comp, t, None)
+                if val is not None:
+                    original = val.to(self.device)
                     noise = torch.randn_like(original) * 0.5
                     corrupted_cache[comp, t] = original + noise
 
@@ -355,12 +362,14 @@ class CausalTracer:
             fully_corrupted = ActivationCache()
             for c in components:
                 for t in cache.timesteps:
-                    if c in cache._store:
-                        fully_corrupted[c, t] = corrupted_cache[c, t]
+                    corrupted_val = corrupted_cache.get(c, t, None)
+                    if corrupted_val is not None:
+                        fully_corrupted[c, t] = corrupted_val
 
             for t in cache.timesteps:
-                if comp in cache._store:
-                    fully_corrupted[comp, t] = cache[comp, t].to(self.device)
+                val = cache.get(comp, t, None)
+                if val is not None:
+                    fully_corrupted[comp, t] = val.to(self.device)
 
             restored_metric = metric_fn(fully_corrupted)
             blockage = (restored_metric - corrupted_metric) / (

@@ -73,14 +73,17 @@ class ActivationCacheSerializer:
         }
         root.attrs["metadata"] = metadata
 
-        for (name, t), val in cache._store.items():
-            if isinstance(val, torch.Tensor):
-                key = f"{name}_{t}"
-                root.array(
-                    key,
-                    data=val.cpu().numpy(),
-                    compressor=compressor,
-                )
+        # Iterate via public API to avoid accessing internals.
+        for name in cache.component_names:
+            for t in cache.timesteps:
+                val = cache.get(name, t, None)
+                if isinstance(val, torch.Tensor):
+                    key = f"{name}_{t}"
+                    root.array(
+                        key,
+                        data=val.cpu().numpy(),
+                        compressor=compressor,
+                    )
 
     def _to_hdf5(self, cache: ActivationCache, path: str) -> None:
         import h5py
@@ -92,10 +95,12 @@ class ActivationCacheSerializer:
             }
             f.attrs["metadata"] = json.dumps(metadata)
 
-            for (name, t), val in cache._store.items():
-                if isinstance(val, torch.Tensor):
-                    key = f"{name}_{t}"
-                    f.create_dataset(key, data=val.cpu().numpy())
+            for name in cache.component_names:
+                for t in cache.timesteps:
+                    val = cache.get(name, t, None)
+                    if isinstance(val, torch.Tensor):
+                        key = f"{name}_{t}"
+                        f.create_dataset(key, data=val.cpu().numpy())
 
     def _to_numpy(self, cache: ActivationCache, path: str) -> None:
         Path(path).mkdir(parents=True, exist_ok=True)
@@ -107,9 +112,11 @@ class ActivationCacheSerializer:
         with open(f"{path}/metadata.json", "w") as f:
             json.dump(metadata, f)
 
-        for (name, t), val in cache._store.items():
-            if isinstance(val, torch.Tensor):
-                np.save(f"{path}/{name}_{t}.npy", val.cpu().numpy())
+        for name in cache.component_names:
+            for t in cache.timesteps:
+                val = cache.get(name, t, None)
+                if isinstance(val, torch.Tensor):
+                    np.save(f"{path}/{name}_{t}.npy", val.cpu().numpy())
 
     @classmethod
     def from_disk(
