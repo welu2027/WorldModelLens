@@ -20,7 +20,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 from world_model_lens import HookContext, HookedWorldModel, HookPoint, WorldModelConfig
 from world_model_lens.backends.dreamerv3 import DreamerV3Adapter
 from world_model_lens.patching.patcher import TemporalPatcher
-from world_model_lens.visualization import CacheSignalPlotter, InterventionVisualizer
+from world_model_lens.visualization import plot_patching_dashboard
 
 
 def main():
@@ -74,63 +74,16 @@ def main():
         print(f"    {patch.component}@t={patch.timestep}: recovery={patch.recovery_rate:.3f}")
 
     print("\n[4] Building visualization dashboard...")
-
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle("WorldModelLens - Activation Patching Dashboard", fontsize=14)
-
-    # 1. Recovery rate heatmap
-    ax = axes[0]
-    recovery_matrix = sweep_result.recovery_matrix().cpu().numpy()
-    im = ax.imshow(recovery_matrix, aspect="auto", cmap="RdYlGn", vmin=0, vmax=1)
-    ax.set_yticks(range(len(sweep_result.components)))
-    ax.set_yticklabels(sweep_result.components)
-    ax.set_xticks(range(len(sweep_result.timesteps)))
-    ax.set_xticklabels(sweep_result.timesteps)
-    ax.set_xlabel("Timestep")
-    ax.set_ylabel("Component")
-    ax.set_title("Recovery Rate Heatmap")
-    plt.colorbar(im, ax=ax, label="Recovery Rate")
-
-    # 2. Divergence between clean and corrupted trajectories
-    ax = axes[1]
-    iv = InterventionVisualizer(wm)
-    divergence_curve = iv.divergence_curve(clean_traj, corrupted_traj)
-    ts = sorted(divergence_curve.keys())
-    divs = [divergence_curve[t] for t in ts]
-    cum_divs = []
-    running = 0.0
-    for d in divs:
-        running += d
-        cum_divs.append(running)
-    ax.plot(ts, divs, marker="o", label="Step divergence", color="tomato")
-    ax.plot(ts, cum_divs, marker="s", linestyle="--", label="Cumulative", color="navy")
-    ax.axvline(5, color="gray", linestyle=":", linewidth=1.5, label="Corruption starts")
-    ax.set_xlabel("Timestep")
-    ax.set_ylabel("MSE Divergence")
-    ax.set_title("Clean vs Corrupted Divergence")
-    ax.legend(fontsize=8)
-
-    # 3. Hidden state norms: clean vs corrupted
-    ax = axes[2]
-    h_clean = CacheSignalPlotter.plot_cache_signal(clean_cache, "h")
-    h_corrupt = CacheSignalPlotter.plot_cache_signal(corrupted_cache, "h")
-    ax.plot(h_clean["timesteps"], h_clean["norms"], marker="o", label="Clean", color="steelblue")
-    ax.plot(
-        h_corrupt["timesteps"],
-        h_corrupt["norms"],
-        marker="s",
-        linestyle="--",
-        label="Corrupted",
-        color="darkorange",
+    plot_patching_dashboard(
+        wm=wm,
+        sweep_result=sweep_result,
+        clean_traj=clean_traj,
+        corrupted_traj=corrupted_traj,
+        clean_cache=clean_cache,
+        corrupted_cache=corrupted_cache,
+        corruption_start_t=5,
+        output_path=OUTPUT_DIR / "patching_dashboard.png",
     )
-    ax.axvline(5, color="gray", linestyle=":", linewidth=1.5, label="Corruption starts")
-    ax.set_xlabel("Timestep")
-    ax.set_ylabel("||h_t||")
-    ax.set_title("Hidden State Norms: Clean vs Corrupted")
-    ax.legend(fontsize=8)
-
-    plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "patching_dashboard.png", dpi=120, bbox_inches="tight")
     print("    Saved patching_dashboard.png")
     plt.show()
 

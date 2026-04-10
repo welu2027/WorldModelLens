@@ -18,7 +18,7 @@ from world_model_lens.causal import (
     Intervention,
     rollout_comparison,
 )
-from world_model_lens.visualization import CacheSignalPlotter, InterventionVisualizer
+from world_model_lens.visualization import plot_causal_engine_dashboard
 
 OUTPUT_DIR = pathlib.Path("assets/examples")
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -130,54 +130,14 @@ def main():
 
     # --- Build visualization dashboard ---
     print("\nBuilding visualization dashboard...")
-
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle("WorldModelLens - Causal Engine Dashboard", fontsize=14)
-
-    # 1. Cumulative divergence curve 
-    ax = axes[0]
-    ts = sorted(div_curve.keys())
-    divs = [div_curve[t] for t in ts]
-    ax.plot(ts, divs, marker="o", color="tomato")
-    ax.axvline(5, color="gray", linestyle="--", linewidth=1.5, label="Intervention at t=5")
-    ax.set_xlabel("Timestep")
-    ax.set_ylabel("Cumulative Divergence")
-    ax.set_title("Baseline vs Counterfactual\nCumulative Divergence")
-    ax.legend(fontsize=8)
-
-    # 2. Branch divergence bar chart 
-    ax = axes[1]
-    branch_labels = [br.intervention.description for br in tree.branches]
-    branch_divs = [br.divergence for br in tree.branches]
-    colors = ["steelblue", "darkorange", "mediumseagreen"]
-    bars = ax.bar(range(len(branch_labels)), branch_divs, color=colors[: len(branch_labels)])
-    ax.set_xticks(range(len(branch_labels)))
-    ax.set_xticklabels(branch_labels, fontsize=8, rotation=10)
-    ax.set_ylabel("Trajectory Distance")
-    ax.set_title("Divergence per Intervention Branch")
-    for bar, val in zip(bars, branch_divs):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.001,
-            f"{val:.4f}",
-            ha="center",
-            va="bottom",
-            fontsize=8,
-        )
-
-    # 3. Outcome delta per intervention 
-    ax = axes[2]
-    iv = InterventionVisualizer(wm)
-    h_signal = CacheSignalPlotter.plot_cache_signal(cache, "h")
-    ax.plot(h_signal["timesteps"], h_signal["norms"], marker="o", color="steelblue")
-    ax.axvline(5, color="red", linestyle="--", linewidth=1.5, label="Intervention at t=5")
-    ax.set_xlabel("Timestep")
-    ax.set_ylabel("||h_t||")
-    ax.set_title("Baseline Hidden State Norms")
-    ax.legend(fontsize=8)
-
-    plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "causal_engine_dashboard.png", dpi=80, bbox_inches="tight")
+    plot_causal_engine_dashboard(
+        wm=wm,
+        div_curve=div_curve,
+        tree=tree,
+        cache=cache,
+        intervention_t=5,
+        output_path=OUTPUT_DIR / "causal_engine_dashboard.png",
+    )
     print("    Saved causal_engine_dashboard.png")
     plt.show()
 

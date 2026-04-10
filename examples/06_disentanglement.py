@@ -18,7 +18,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 from world_model_lens import HookedWorldModel, WorldModelConfig
 from world_model_lens.backends.dreamerv3 import DreamerV3Adapter
 from world_model_lens.analysis.belief_analyzer import BeliefAnalyzer
-from world_model_lens.visualization import CacheSignalPlotter
+from world_model_lens.visualization import plot_disentanglement_dashboard
 
 
 def main():
@@ -67,75 +67,12 @@ def main():
         print(f"    {factor}: dims {dims[:5]}...")
 
     print("\n[5] Building visualization dashboard...")
-
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    fig.suptitle("WorldModelLens - Disentanglement Analysis Dashboard", fontsize=14)
-
-    # 1. MIG/DCI/SAP scores
-    ax = axes[0]
-    metric_names = ["MIG", "DCI", "SAP"]
-    metric_vals = [disentanglement_result.scores.get(m, 0.0) for m in metric_names]
-    colors = ["steelblue", "darkorange", "mediumseagreen"]
-    bars = ax.bar(metric_names, metric_vals, color=colors)
-    ax.set_ylabel("Score")
-    ax.set_title(f"Disentanglement Metrics\n(total={disentanglement_result.total_score:.4f})")
-    for bar, val in zip(bars, metric_vals):
-        ax.text(
-            bar.get_x() + bar.get_width() / 2,
-            bar.get_height() + 0.001,
-            f"{val:.4f}",
-            ha="center",
-            va="bottom",
-            fontsize=9,
-        )
-
-    # 2. Factor-dimension assignment heatmap
-    ax = axes[1]
-    factor_names = list(disentanglement_result.factor_dim_assignment.keys())
-    n_dims_show = 32
-    heatmap_data = np.zeros((len(factor_names), n_dims_show))
-    for i, fname in enumerate(factor_names):
-        for d in disentanglement_result.factor_dim_assignment[fname]:
-            if d < n_dims_show:
-                heatmap_data[i, d] = 1.0
-    if heatmap_data.sum() == 0:  # Fallback: show per-dim variance if no clear factor assignment
-        z_seq = cache["z_posterior"]  # [50 timesteps, d_z]
-        var_per_dim = z_seq.var(dim=0).detach().numpy()[:n_dims_show]
-        heatmap_data = np.tile(var_per_dim, (len(factor_names), 1))
-    im = ax.imshow(heatmap_data, aspect="auto", cmap="Blues")
-    ax.set_yticks(range(len(factor_names)))
-    ax.set_yticklabels(factor_names)
-    ax.set_xlabel("Latent Dimension")
-    ax.set_title("Factor-Dimension Assignment")
-    plt.colorbar(im, ax=ax)
-
-    # 3. PCA of z_posterior
-    ax = axes[2]
-    z_seq = cache["z_posterior"]  # [50 timesteps, d_z]
-    z_centered = z_seq - z_seq.mean(dim=0)
-    _, _, Vt = torch.pca_lowrank(z_centered, q=2)
-    pca_proj = (z_centered @ Vt).detach().numpy()  # [50 timesteps, 2 PCA dims]
-
-    reward_colors = factors["reward_level"].numpy()
-    sc = ax.scatter(
-        pca_proj[:, 0],
-        pca_proj[:, 1],
-        c=reward_colors,
-        cmap="RdYlGn",
-        s=30,
-        alpha=0.8,
+    plot_disentanglement_dashboard(
+        disentanglement_result=disentanglement_result,
+        cache=cache,
+        factors=factors,
+        output_path=OUTPUT_DIR / "disentanglement_dashboard.png",
     )
-    plt.colorbar(sc, ax=ax, label="reward_level")
-    # Annotate 5 evenly spaced timesteps:
-    # 0, 50//4=12, 50//2=25, 3*50//4=37, 50-1
-    for i in [0, 12, 25, 37, 49]:
-        ax.annotate(str(i), (pca_proj[i, 0], pca_proj[i, 1]), fontsize=7)
-    ax.set_xlabel("PC1")
-    ax.set_ylabel("PC2")
-    ax.set_title("z_posterior PCA (colored by reward_level)")
-
-    plt.tight_layout()
-    plt.savefig(OUTPUT_DIR / "disentanglement_dashboard.png", dpi=120, bbox_inches="tight")
     print("    Saved disentanglement_dashboard.png")
     plt.show()
 
