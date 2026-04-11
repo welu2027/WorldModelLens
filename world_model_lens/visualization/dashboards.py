@@ -659,6 +659,10 @@ def plot_toy_video_dashboard(
     traj: Any,
     cache: Any,
     mem_result: Any,
+    # surprise_result=None,  # BeliefAnalyzer.surprise_timeline() result
+    # traj_metrics=None,    # GeometryAnalyzer.trajectory_metrics() result
+    # manifold_result=None, # GeometryAnalyzer.manifold_analysis() result
+    # dep_result=None,      # TemporalMemoryProber.temporal_dependencies() result
     output_path: Optional[pathlib.Path] = None,
 ) -> Any:
     """Three-panel toy-video dashboard: latent PCA of moving-pattern video,
@@ -678,13 +682,19 @@ def plot_toy_video_dashboard(
     fig, axes = plt.subplots(1, 3, figsize=(15, 4))
     fig.suptitle("WorldModelLens - Toy Video World Model Dashboard", fontsize=14)
 
-    # 1. Latent state PCA colored by timestep
+    # 1. Latent state PCA colored by timestep (or surprise if available)
     state_tensors = torch.stack([traj.states[t].state for t in range(T)])
     state_centered = state_tensors - state_tensors.mean(dim=0)
     _, _, Vt = torch.pca_lowrank(state_centered, q=2)
     pca_proj = (state_centered @ Vt).detach().numpy()
 
     ax = axes[0]
+    # if surprise_result is not None:
+    #     # Color by surprise values
+    #     surprise_vals = [surprise_result.mean_surprise if hasattr(surprise_result, 'mean_surprise') else 0] * T  # placeholder
+    #     sc = ax.scatter(pca_proj[:, 0], pca_proj[:, 1], c=surprise_vals, cmap="plasma")
+    #     plt.colorbar(sc, ax=ax, label="Surprise")
+    # else:
     sc = ax.scatter(pca_proj[:, 0], pca_proj[:, 1], c=np.arange(T), cmap="plasma")
     plt.colorbar(sc, ax=ax, label="Timestep")
     ax.set_xlabel("PC1")
@@ -699,6 +709,13 @@ def plot_toy_video_dashboard(
     ax.set_xlabel("Timestep")
     ax.set_ylabel("||z_posterior||")
     ax.set_title("Latent Activation Norms")
+    # if traj_metrics is not None:
+    #     # Add trajectory metrics as text
+    #     dist = getattr(traj_metrics, 'mean_trajectory_distance', 0)
+    #     coh = getattr(traj_metrics, 'temporal_coherence', 0)
+    #     ax.text(0.05, 0.95, f'Distance: {dist:.3f}\nCoherence: {coh:.3f}', 
+    #             transform=ax.transAxes, fontsize=8, verticalalignment='top',
+    #             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
 
     # 3. Memory retention
     ax = axes[2]
@@ -712,7 +729,16 @@ def plot_toy_video_dashboard(
         ax.plot(lags, vals, marker="o", color="steelblue")
         ax.set_xlabel("Lag")
         ax.set_ylabel("Retention")
-    ax.set_title(f"Memory Retention (capacity={mem_result.memory_capacity:.2f})")
+    title = f"Memory Retention (capacity={mem_result.memory_capacity:.2f})"
+    # if manifold_result is not None:
+    #     dim = getattr(manifold_result, 'intrinsic_dimensionality_estimate', 'N/A')
+    #     title += f"\nIntrinsic Dim: {dim}"
+    # if dep_result is not None and hasattr(dep_result, 'autocorrelations'):
+    #     autocorr = dep_result['autocorrelations']
+    #     if len(autocorr) > 0:
+    #         top_corr = max(autocorr[:5]) if len(autocorr) >= 5 else max(autocorr)
+    #         title += f"\nTop Autocorr: {top_corr:.3f}"
+    ax.set_title(title)
 
     plt.tight_layout()
     if output_path is not None:

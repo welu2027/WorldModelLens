@@ -12,6 +12,7 @@ import torch
 import torch.nn as nn
 
 from world_model_lens.backends.generic_adapter import WorldModelAdapter, WorldModelConfig
+from world_model_lens.core.world_state import WorldState, WorldDynamics, WorldModelOutput
 
 
 class VideoEncoder(nn.Module):
@@ -83,7 +84,7 @@ class VideoWorldModelAdapter(WorldModelAdapter):
             self.frame_size *= dim
 
         self.encoder = VideoEncoder(self.frame_size, config.d_state)
-        self.dynamics = VideoDynamics(config.d_state)
+        self._dynamics = VideoDynamics(config.d_state)
         self.decoder = VideoDecoder(config.d_state, self.frame_size)
 
     @property
@@ -109,7 +110,7 @@ class VideoWorldModelAdapter(WorldModelAdapter):
 
     def dynamics(self, state: torch.Tensor, action: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Predict next latent state."""
-        return self.dynamics(state)
+        return self._dynamics(state)
 
     def transition(
         self,
@@ -129,20 +130,23 @@ class VideoWorldModelAdapter(WorldModelAdapter):
         observation: torch.Tensor,
         state: Optional[torch.Tensor] = None,
         action: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> WorldModelOutput:
         """Full video prediction forward pass."""
         posterior, obs_encoding = self.encode(observation, state)
         prior = self.dynamics(state if state is not None else self.initial_state())
         next_state = self.transition(posterior, action)
         reconstruction = self.decode(posterior)
 
-        return {
-            "posterior": posterior,
-            "prior": prior,
-            "next_state": next_state,
-            "reconstruction": reconstruction,
-            "obs_encoding": obs_encoding,
-        }
+        return WorldModelOutput(
+            next_state=WorldState(state=next_state, timestep=0),
+            observation_reconstruction=reconstruction,
+            dynamics=WorldDynamics(
+                prior_state=prior,
+                posterior_state=posterior,
+                kl_divergence=None,  # Not computed for video model
+            ),
+            hidden_state=obs_encoding,
+        )
 
     def predict_next_frame(
         self,
@@ -158,7 +162,8 @@ class VideoWorldModelAdapter(WorldModelAdapter):
         Returns:
             Tuple of (predicted_frames, latent_states)
         """
-        state, _ = self.encode(current_frame)
+        state, _ = self.encode(current_frame.unsqueeze(0))
+        state = state.squeeze(0)
         predictions = []
         states = [state]
 
@@ -168,4 +173,4 @@ class VideoWorldModelAdapter(WorldModelAdapter):
             predictions.append(pred_frame)
             states.append(state)
 
-        return torch.stack(predictions, dim=0), torch.stack(states, dim=0)
+        return torch.stack(predictions, dim=0), states

@@ -13,9 +13,16 @@ A video prediction model:
 import torch
 import numpy as np
 
-from world_model_lens import HookedWorldModel, WorldModelConfig
+from world_model_lens import HookedWorldModel
+#from world_model_lens.core.config import WorldModelConfig
+from world_model_lens.backends.generic_adapter import WorldModelConfig
 from world_model_lens.backends.video_adapter import VideoWorldModelAdapter
+from world_model_lens.visualization import plot_video_model_dashboard
+import matplotlib.pyplot as plt
+import pathlib
 
+OUTPUT_DIR = pathlib.Path("assets/examples")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def main():
     print("=" * 60)
@@ -60,7 +67,7 @@ def main():
     n_pred = 5
     preds, states = video_model.predict_next_frame(current_frame, n_frames=n_pred)
     print(f"    Predicted frames shape: {preds.shape}")
-    print(f"    Latent states shape: {states.shape}")
+    print(f"    Latent states: {len(states)} states, first state shape: {states[0].shape if states else 'N/A'}")
 
     print("\n[7] Running imagination (latent rollout)...")
     start_state = traj.states[0].state
@@ -69,6 +76,10 @@ def main():
         horizon=10,
     )
     print(f"    Imagined {len(imagined_states)} future states")
+
+    print("\n[8] Plotting video model dashboard...")
+    fig = plot_video_model_dashboard(traj, frames, preds, output_path=OUTPUT_DIR / "video_model_dashboard.png")
+    plt.show()
 
     print("\n" + "=" * 60)
     print("Video prediction world model works with World Model Lens!")
