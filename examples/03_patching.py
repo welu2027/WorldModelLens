@@ -5,14 +5,22 @@ This example demonstrates:
 2. Patching specific components
 3. Measuring recovery rate
 4. Full patching sweep
+5. Visualizing recovery heatmap and divergence
 """
+
+import pathlib
 
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
+
+OUTPUT_DIR = pathlib.Path("assets/examples")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 from world_model_lens import HookContext, HookedWorldModel, HookPoint, WorldModelConfig
 from world_model_lens.backends.dreamerv3 import DreamerV3Adapter
 from world_model_lens.patching.patcher import TemporalPatcher
+from world_model_lens.visualization import plot_patching_dashboard
 
 
 def main():
@@ -64,6 +72,20 @@ def main():
     top_patches = sweep_result.top_k_patches(k=5)
     for patch in top_patches:
         print(f"    {patch.component}@t={patch.timestep}: recovery={patch.recovery_rate:.3f}")
+
+    print("\n[4] Building visualization dashboard...")
+    plot_patching_dashboard(
+        wm=wm,
+        sweep_result=sweep_result,
+        clean_traj=clean_traj,
+        corrupted_traj=corrupted_traj,
+        clean_cache=clean_cache,
+        corrupted_cache=corrupted_cache,
+        corruption_start_t=5,
+        output_path=OUTPUT_DIR / "patching_dashboard.png",
+    )
+    print("    Saved patching_dashboard.png")
+    plt.show()
 
     print("\n" + "=" * 60)
     print("Patching complete!")

@@ -6,12 +6,19 @@ This example demonstrates:
 3. Visualizing factor-dimension assignments
 """
 
+import pathlib
+
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
+
+OUTPUT_DIR = pathlib.Path("assets/examples")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 from world_model_lens import HookedWorldModel, WorldModelConfig
 from world_model_lens.backends.dreamerv3 import DreamerV3Adapter
 from world_model_lens.analysis.belief_analyzer import BeliefAnalyzer
+from world_model_lens.visualization import plot_disentanglement_dashboard
 
 
 def main():
@@ -58,6 +65,16 @@ def main():
     print("\n[4] Factor assignments:")
     for factor, dims in disentanglement_result.factor_dim_assignment.items():
         print(f"    {factor}: dims {dims[:5]}...")
+
+    print("\n[5] Building visualization dashboard...")
+    plot_disentanglement_dashboard(
+        disentanglement_result=disentanglement_result,
+        cache=cache,
+        factors=factors,
+        output_path=OUTPUT_DIR / "disentanglement_dashboard.png",
+    )
+    print("    Saved disentanglement_dashboard.png")
+    plt.show()
 
     print("\n" + "=" * 60)
     print("Disentanglement analysis complete!")

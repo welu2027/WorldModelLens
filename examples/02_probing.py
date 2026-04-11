@@ -5,13 +5,23 @@ This example demonstrates:
 2. Creating synthetic labels for concepts
 3. Training linear probes
 4. Analyzing probe results
+5. Visualizing latent structure
 """
+
+import pathlib
 
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
+
+OUTPUT_DIR = pathlib.Path("assets/examples")
+
+OUTPUT_DIR = pathlib.Path(__file__).parent.parent / "assets" / "examples"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 from world_model_lens import HookedWorldModel, LatentProber, WorldModelConfig
 from world_model_lens.backends.dreamerv3 import DreamerV3Adapter
+from world_model_lens.visualization import plot_probing_dashboard
 
 
 def main():
@@ -66,6 +76,18 @@ def main():
     print("\n[3] Probe Results:")
     for key, result in sweep_result.results.items():
         print(f"    {key}: accuracy={result.accuracy:.3f}")
+
+    print("\n[4] Building visualization dashboard...")
+    plot_probing_dashboard(
+        sweep_result=sweep_result,
+        activations=activations,
+        labels=labels,
+        concepts=concepts,
+        cache=cache,
+        output_path=OUTPUT_DIR / "probing_dashboard.png",
+    )
+    print("    Saved probing_dashboard.png")
+    plt.show()
 
     print("\n" + "=" * 60)
     print("Probing complete!")
