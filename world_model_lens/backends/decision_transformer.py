@@ -139,12 +139,13 @@ class DecisionTransformerAdapter(WorldModelAdapter):
     def __init__(self, config: AdapterConfig):
         super().__init__(config)
         self.config = config
+        self.state_dim = config.d_obs
 
         self.transformer = DecisionTransformer(
             d_model=config.d_embed,
             n_layers=config.n_layers,
             n_head=config.n_heads,
-            state_dim=config.d_obs,
+            state_dim=self.state_dim,
             action_dim=config.d_action,
             max_len=config.imagination_horizon,
         )
@@ -163,18 +164,28 @@ class DecisionTransformerAdapter(WorldModelAdapter):
     def world_model_family(self) -> WorldModelFamily:
         return WorldModelFamily.DECISION_TRANSFORMER
 
+    def _normalize_state(self, state: torch.Tensor) -> torch.Tensor:
+        """Normalize a state tensor to [B, T, d_obs] for DT forward passes."""
+        if state.dim() > 2:
+            state = state.flatten(start_dim=1)
+        if state.dim() == 1:
+            state = state.unsqueeze(0)
+        if state.dim() == 2:
+            state = state.unsqueeze(1)
+        return state
+
     def encode(
         self,
         obs: torch.Tensor,
         h_prev: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Encode observation to the DT state representation."""
+        """Use the raw observation-space state as the DT latent/state carrier."""
         del h_prev
-        if obs.dim() == 1:
+        if obs.dim() > 2:
+            obs = obs.flatten(start_dim=1)
+        elif obs.dim() == 1:
             obs = obs.unsqueeze(0)
-
-        z = self.transformer.embedding.state_embedding(obs)
-        return z, z
+        return obs, obs
 
     def transition(
         self,
@@ -182,18 +193,10 @@ class DecisionTransformerAdapter(WorldModelAdapter):
         z: torch.Tensor,
         action: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Predict the next state representation.
-
-        Decision Transformer is internally single-state, so `z` carries the
-        effective model state and `h` is unused.
-        """
+        """Predict the next state representation in observation space."""
         del h
-        batch_size = z.shape[0] if z.dim() > 1 else 1
-
-        if z.dim() == 1:
-            z = z.unsqueeze(0).unsqueeze(0)
-        elif z.dim() == 2:
-            z = z.unsqueeze(1)
+        z = self._normalize_state(z)
+        batch_size = z.shape[0]
 
         if action is None:
             action = torch.zeros(batch_size, 1, self.config.d_action, device=z.device)
@@ -220,12 +223,8 @@ class DecisionTransformerAdapter(WorldModelAdapter):
     ) -> Optional[torch.Tensor]:
         """Predict action from the current state token."""
         del h
-        batch_size = z.shape[0] if z.dim() > 1 else 1
-
-        if z.dim() == 1:
-            z = z.unsqueeze(0).unsqueeze(0)
-        elif z.dim() == 2:
-            z = z.unsqueeze(1)
+        z = self._normalize_state(z)
+        batch_size = z.shape[0]
 
         action = torch.zeros(batch_size, 1, self.config.d_action, device=z.device)
         returns = torch.zeros(batch_size, 1, device=z.device)
@@ -248,10 +247,10 @@ class DecisionTransformerAdapter(WorldModelAdapter):
         batch_size: int = 1,
         device: Optional[torch.device] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Initialize hidden and latent state."""
+        """Initialize hidden and latent state in observation space."""
         if device is None:
             device = self._device
-        state = torch.zeros(batch_size, self.config.d_embed, device=device)
+        state = torch.zeros(batch_size, self.state_dim, device=device)
         return state, state
 
     def to(self, device: torch.device) -> "DecisionTransformerAdapter":
