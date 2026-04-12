@@ -149,6 +149,13 @@ class IRISAdapter(WorldModelAdapter):
         self.continue_head = IRISContinueHead(d_model)
 
         self._device = torch.device("cpu")
+        
+        # Set capabilities so HookedWorldModel knows to call the predictive heads
+        self._capabilities.has_reward_head = True
+        self._capabilities.has_continue_head = False # Disabled for now (needs mapping)
+        self._capabilities.has_actor = False        # Disabled for now (needs mapping)
+        self._capabilities.has_critic = False       # Disabled for now (needs mapping)
+        self._capabilities.uses_actions = True
 
     @property
     def hook_point_names(self) -> List[str]:
@@ -158,54 +165,117 @@ class IRISAdapter(WorldModelAdapter):
         return names
 
     def encode(self, obs: torch.Tensor, h_prev: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        if obs.dim() > 1:
-            obs = (
-                obs.flatten(start_dim=1)
-                if obs.dim() > 2
-                else obs.squeeze(0)
-                if obs.dim() == 2
-                else obs
-            )
+        """Encode observation into discrete latent.
 
+        Note: IRIS tokens are discrete. 'posterior' here is the one-hot or
+        categorical distribution (logits) for the current observation.
+        """
+        # Flatten observation if needed (e.g. from [B, C, H, W] to [B, D])
+        if obs.dim() > 2:
+            obs = obs.flatten(start_dim=1)
+        elif obs.dim() == 2 and obs.shape[1] != self.config.d_obs:
+            # If [B, H] but H is not d_obs, maybe it's just a single frame without batch?
+            # HookedWorldModel usually passes [B, ...].
+            pass
+
+        # IRIS observation encoder (VQ-VAE)
         z_q, indices = self.encoder(obs)
-        logits = torch.zeros(self.d_model, device=obs.device)
+        # For IRIS, the posterior is degenerate (deterministic from pixels),
+        # but we return it as logits over vocab for HookedWorldModel compatibility.
+        # indices: [B, 1] or [B] -> logits: [B, vocab_size]
+        B = obs.shape[0]
+        logits = torch.zeros(B, self.vocab_size, device=obs.device, dtype=obs.dtype)
+        logits.scatter_(1, indices.view(B, 1), 1.0)
         return logits, z_q
 
     def dynamics(self, h: torch.Tensor) -> torch.Tensor:
-        return torch.zeros(self.vocab_size, device=h.device)
+        """Predict next token logits from history.
 
-    def decode(self, h: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError("IRIS uses VQVAE decoder, decode not standard")
-
-    def predict_reward(self, h: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        Args:
+            h: History buffer (tokens accumulated so far).
+        """
+        # h: [B, T] sequence of tokens
         if h.dim() == 1:
             h = h.unsqueeze(0)
-        return self.reward_head(h)
 
-    def predict_continue(self, h: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        # Transformer predicts next tokens for the entire sequence
+        logits, _ = self.transformer(h)
+        # Return only the last timestep's logits for the next prediction
+        return logits[:, -1, :]
+
+    def transition(self, h: torch.Tensor, z: torch.Tensor, action: torch.Tensor = None) -> torch.Tensor:
+        """Update history by appending the new token.
+
+        Args:
+            h: Current history [B, T]
+            z: Decided token [B] or [B, 1] or one-hot [B, vocab]
+            action: Optional action (not used in minimalist transformer)
+        """
+        # Ensure h is [B, T]
         if h.dim() == 1:
             h = h.unsqueeze(0)
-        return self.continue_head(h)
+        
+        B = h.shape[0]
 
-    def actor_forward(self, h: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+        # Ensure z is [B, 1] index
+        if z.dim() == 2 and z.shape[1] == self.vocab_size:
+            # One-hot/logits [B, V] -> [B, 1]
+            z = z.argmax(dim=-1, keepdim=True)
+        elif z.dim() == 1:
+            if z.shape[0] == B:
+                # [B] -> [B, 1]
+                z = z.unsqueeze(1)
+            else:
+                # [V] (squeezed batch one-hot) -> should not happen but be safe
+                z = z.argmax(dim=-1).view(1, 1).expand(B, 1)
+        elif z.dim() == 0:
+            # Scalar token -> [1, 1]
+            z = z.view(1, 1).expand(B, 1)
+
+        # Append to sequence: [B, T] + [B, 1] -> [B, T+1]
+        next_h = torch.cat([h, z], dim=1)
+
+        # Truncate if exceeding max_seq_len (e.g. 1024)
+        if next_h.shape[1] > 1024:
+            next_h = next_h[:, -1024:]
+
+        return next_h
+
+    def _get_transformer_h(self, h: torch.Tensor) -> torch.Tensor:
+        """Helper to get the latent 'h' from the token history sequence."""
         if h.dim() == 1:
             h = h.unsqueeze(0)
-        logits = self.transformer.head(h)
-        return logits
+        # We only care about the last token's representation: [B, T, D] -> [B, D]
+        _, last_h = self.transformer(h)
+        return last_h[:, -1, :]
 
-    def critic_forward(self, h: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
-        if h.dim() == 1:
-            h = h.unsqueeze(0)
-        return self.reward_head(h)
+    def predict_reward(self, h: torch.Tensor, z: torch.Tensor = None) -> torch.Tensor:
+        """Predict reward from history."""
+        feat = self._get_transformer_h(h)
+        return self.reward_head(feat)
 
-    def transition(self, h: torch.Tensor, z: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        if z.dim() == 1:
-            z = z.unsqueeze(0)
-        return z
+    def predict_continue(self, h: torch.Tensor, z: torch.Tensor = None) -> torch.Tensor:
+        """Predict continue probability from history."""
+        feat = self._get_transformer_h(h)
+        return self.continue_head(feat)
 
-    def initial_state(self, batch_size: int = 1) -> Tuple[torch.Tensor, torch.Tensor]:
-        h = torch.zeros(batch_size, self.d_model, device=self._device)
-        z = torch.zeros(batch_size, self.d_model, device=self._device)
+    def actor_forward(self, h: torch.Tensor, z: torch.Tensor = None) -> torch.Tensor:
+        """Predict action logits from history."""
+        feat = self._get_transformer_h(h)
+        return self.transformer.head(feat)
+
+    def critic_forward(self, h: torch.Tensor, z: torch.Tensor = None) -> torch.Tensor:
+        """Predict value from history."""
+        feat = self._get_transformer_h(h)
+        return self.reward_head(feat) # In many IRIS versions, reward/value heads are shared or similar
+
+    def initial_state(self, batch_size: int = 1, device: Optional[torch.device] = None) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Create empty history."""
+        device = device or self._device
+        # h: [B, 1] with a zero token as a placeholder. 
+        h = torch.zeros(batch_size, 1, dtype=torch.long, device=device)
+        # z: [B, vocab] initial distribution
+        z = torch.zeros(batch_size, self.vocab_size, device=device)
         return h, z
 
     def named_parameters(self) -> Dict[str, torch.Tensor]:

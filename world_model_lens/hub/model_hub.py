@@ -512,18 +512,29 @@ class ModelHub:
         # ── Infer hyperparameters from checkpoint tensor shapes ──────────────
         # This avoids hardcoding dims that differ across games / training runs.
         # The IRIS Pong checkpoint uses d_model=256; Breakout uses 512; etc.
-        d_model = cls._infer_dim(wm_state, "transformer.blocks.0.ln1.weight", dim=0, fallback=256)
+        # Try a few common keys for d_model inference
+        d_model = cls._infer_dim(wm_state, "transformer.blocks.0.ln1.weight", dim=0, fallback=None)
+        if d_model is None:
+            d_model = cls._infer_dim(wm_state, "transformer.ln.weight", dim=0, fallback=256)
+
         n_layers = sum(
             1 for k in wm_state
             if k.startswith("transformer.blocks.") and k.endswith(".ln1.weight")
         ) or 10
+
         max_seq_len = cls._infer_dim(wm_state, "pos_emb.weight", dim=0, fallback=1024)
+
         # token_embedding tells us the vocab size of the first embedder table
-        emb0_vocab = cls._infer_dim(wm_state, "embedder.embedding_tables.0.weight", dim=0, fallback=512)
+        emb0_vocab = cls._infer_dim(wm_state, "embedder.embedding_tables.0.weight", dim=0, fallback=None)
+        if emb0_vocab is None:
+            emb0_vocab = cls._infer_dim(wm_state, "transformer.token_embedding.weight", dim=0, fallback=512)
+
         # n_head: inferred from attention key weight shape [n_head*head_dim, d_model]
-        # We can't easily infer n_head without knowing head_dim, so keep 4 for d_model=256
-        # and 8 for d_model=512 (standard IRIS config).
+        # or just fallback to paper defaults based on d_model.
         n_head = 8 if d_model >= 512 else 4
+
+        print(f"[ModelHub] Inferred for '{checkpoint_path.split('/')[-1]}': "
+              f"d_model={d_model}, n_layers={n_layers}, vocab={emb0_vocab}, seq={max_seq_len}")
 
         cfg = WorldModelConfig(
             d_h=d_model,
