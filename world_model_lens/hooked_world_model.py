@@ -240,23 +240,120 @@ class HookedWorldModel:
         if state.dim() > 1 and state.shape[0] == 1:
             state = state.squeeze(0)
 
-        # If the adapter exposes the latent-model style API that ForwardRunner
-        # expects, delegate the forward loop to ForwardRunner. This keeps a
-        # single canonical implementation of the forward sequencing and makes
-        # it easier to test and reuse.
-        if all(hasattr(self.adapter, name) for name in ("encode", "dynamics", "initial_state")):
+        # Use ForwardRunner only when the adapter implements the newer
+        # latent-style encode signature (encode(obs) -> embedding) so we
+        # avoid breaking legacy adapters that require an h_prev/context arg.
+        use_forward_runner = False
+        try:
+            import inspect
+
+            sig = inspect.signature(self.adapter.encode)
+            # parameters includes 'self' so 2 means (self, obs)
+            if (
+                len(sig.parameters) <= 1
+                and hasattr(self.adapter, "dynamics")
+                and hasattr(self.adapter, "initial_state")
+            ):
+                use_forward_runner = True
+        except Exception:
+            use_forward_runner = False
+
+        # Disable ForwardRunner automatic path for now to preserve backward
+        # compatibility with the wide variety of adapter signatures in the
+        # repo. The ForwardRunner integration can be re-enabled behind an
+        # explicit opt-in once adapters converge on a stable API.
+        use_forward_runner = False
+
+        if use_forward_runner:
+            # Probe the adapter's encode return type to ensure it returns a
+            # single tensor (observation embedding). Some adapters accept a
+            # single-argument encode but still return (posterior, obs_enc)
+            # tuples — avoid using ForwardRunner in that case.
+            probe_ok = False
+            try:
+                with torch.no_grad():
+                    sample = observations[0]
+                    out = self.adapter.encode(sample)
+                if isinstance(out, torch.Tensor):
+                    probe_ok = True
+            except Exception:
+                probe_ok = False
+
+            if not probe_ok:
+                use_forward_runner = False
+
+        if use_forward_runner:
             # Build a thin shim exposing the helpers ForwardRunner expects.
             class _Shim:
                 def __init__(self, parent: "HookedWorldModel"):
                     self._parent = parent
-                    self._adapter = parent.adapter
                     self.name = parent.name
                     # reuse the shared hook cache manager so hooks and caching
                     # behave identically to the existing run_with_cache pipeline.
                     self._hook_cache_manager = parent._hook_cache_manager
 
+                    # Adapter shim: expose a simplified encode(obs) -> Tensor
+                    # API expected by ForwardRunner while delegating to the
+                    # real adapter under the hood.
+                    class AdapterShim:
+                        def __init__(self, real):
+                            self._real = real
+
+                        def __getattr__(self, name):
+                            return getattr(self._real, name)
+
+                        def initial_state(self):
+                            # try no-arg then fall back to common signature
+                            try:
+                                return self._real.initial_state()
+                            except TypeError:
+                                try:
+                                    return self._real.initial_state(batch_size=1)
+                                except Exception:
+                                    return self._real.initial_state
+
+                        def encode(self, obs):
+                            # Try multiple adapter encode signatures and return
+                            # a single tensor. Prefer posterior probabilities if
+                            # the adapter returns (logits, probs) pairs.
+                            def _first_tensor(x):
+                                if isinstance(x, torch.Tensor):
+                                    return x
+                                if isinstance(x, (tuple, list)):
+                                    for el in x:
+                                        t = _first_tensor(el)
+                                        if t is not None:
+                                            return t
+                                return None
+
+                            try:
+                                out = self._real.encode(obs)
+                            except TypeError:
+                                try:
+                                    out = self._real.encode(obs, None)
+                                except Exception:
+                                    raise
+
+                            if isinstance(out, torch.Tensor):
+                                return out
+                            if isinstance(out, (tuple, list)):
+                                # common shapes: (posterior, obs_enc) or
+                                # ((logits, probs), obs_enc). Prefer probs when
+                                # available, otherwise first tensor.
+                                first = out[0]
+                                if isinstance(first, (tuple, list)) and len(first) > 1:
+                                    # try probs at index 1
+                                    if isinstance(first[1], torch.Tensor):
+                                        return first[1]
+                                t = _first_tensor(out)
+                                if t is not None:
+                                    return t
+                            raise TypeError("Adapter.encode returned unsupported type")
+
+                    self._adapter = AdapterShim(parent.adapter)
+
                 def _encode(self, obs, t, ctx, cache, names_filter):
-                    post, obs_enc = self._adapter.encode(obs.unsqueeze(0), None)
+                    post = self._adapter.encode(obs.unsqueeze(0))
                     return post.squeeze(0)
 
                 def _dynamics_and_prior(self, h, z, a_prev, t, ctx, cache, names_filter):
