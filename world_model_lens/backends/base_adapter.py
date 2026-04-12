@@ -19,35 +19,69 @@ import torch.nn as nn
 
 @dataclass
 class AdapterConfig:
-    """Minimal backend-local config for adapter modules.
+    """Backend-facing adapter config.
 
-    This is intentionally lightweight and exists for backend modules that
-    import their config shape from `world_model_lens.backends.*` rather than
-    the richer project-level `world_model_lens.core.config`.
+    This intentionally spans both the older backend-local fields and the more
+    Dreamer-style fields used across the concrete adapters in this folder.
     """
 
-    d_state: int = 512
+    d_h: int = 512
+    d_z: Optional[int] = None
+    d_state: Optional[int] = None
     d_action: int = 0
     d_obs: int = 0
     is_discrete: bool = True
-    n_categories: int = 32
-    n_classes: int = 32
+    n_cat: int = 32
+    n_cls: int = 32
+    n_categories: Optional[int] = None
+    n_classes: Optional[int] = None
+    encoder_type: str = "cnn"
+    n_gru_layers: int = 1
+    reward_head: str = "twohot"
+    decoder_type: str = "cnn"
+    activation: str = "silu"
+    n_encoder_channels: int = 48
+    encoder_depth: int = 4
+    continue_head: str = "logistic"
+    discount: float = 0.99
+    free_nats: float = 0.0
+    kl_scale: float = 1.0
+    actor_entropy_scale: float = 1e-4
+    imagination_horizon: int = 50
+    seed: Optional[int] = None
+    has_decoder: bool = True
+    has_reward_head: bool = True
+    has_value_head: bool = True
+    has_policy_head: bool = True
+    has_done_head: bool = True
+    d_embed: int = 256
+    n_layers: int = 4
+    n_heads: int = 4
+    vocab_size: int = 512
+    d_latent: Optional[int] = None
     name: str = "world_model"
     model_type: str = "rssm"
+    backend: str = "custom"
 
-    @property
-    def d_h(self) -> int:
-        return self.d_state
+    def __post_init__(self) -> None:
+        if self.n_categories is None:
+            self.n_categories = self.n_cat
+        if self.n_classes is None:
+            self.n_classes = self.n_cls
 
-    @property
-    def d_z(self) -> int:
-        if self.is_discrete:
-            return self.n_categories * self.n_classes
-        return self.d_state
+        if self.d_state is None:
+            self.d_state = self.d_h
+        elif self.d_h == 512:
+            self.d_h = self.d_state
 
-    @property
-    def d_latent(self) -> int:
-        return self.d_z
+        if self.d_z is None:
+            if self.is_discrete:
+                self.d_z = self.n_cat * self.n_cls
+            else:
+                self.d_z = self.d_state
+
+        if self.d_latent is None:
+            self.d_latent = self.d_h + self.d_z
 
 
 @dataclass

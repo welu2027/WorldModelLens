@@ -8,8 +8,7 @@ from typing import Dict, List, Optional, Tuple, Any
 import torch
 import torch.nn as nn
 
-from world_model_lens.backends.base_adapter import WorldModelAdapter
-from world_model_lens.core.config import WorldModelConfig
+from world_model_lens.backends.base_adapter import WorldModelAdapter, AdapterConfig
 
 
 class CustomAdapter(WorldModelAdapter):
@@ -33,11 +32,11 @@ class CustomAdapter(WorldModelAdapter):
     - [ ] Register in backends/__init__.py and backends/registry.py
     """
 
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         """Initialize your custom adapter.
 
         Args:
-            config: WorldModelConfig with architecture hyperparameters.
+            config: AdapterConfig with architecture hyperparameters.
         """
         super().__init__(config)
         self.config = config
@@ -234,7 +233,7 @@ class CustomAdapter(WorldModelAdapter):
 
     @classmethod
     def from_checkpoint(
-        cls, path: str, config: Optional[WorldModelConfig] = None
+        cls, path: str, config: Optional[AdapterConfig] = None
     ) -> "CustomAdapter":
         """Load adapter from checkpoint file.
 
@@ -249,14 +248,14 @@ class CustomAdapter(WorldModelAdapter):
         raise NotImplementedError("Implement from_checkpoint classmethod")
 
     @classmethod
-    def infer_config(cls, state_dict: Dict) -> WorldModelConfig:
+    def infer_config(cls, state_dict: Dict) -> AdapterConfig:
         """Infer config from state dict shapes.
 
         Args:
             state_dict: Model state dictionary.
 
         Returns:
-            WorldModelConfig with inferred parameters.
+            AdapterConfig with inferred parameters.
         """
         # TODO: Infer config from state dict
         # Example: examine weight shapes to determine dimensions

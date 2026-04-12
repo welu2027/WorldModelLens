@@ -9,8 +9,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from world_model_lens.backends.base_adapter import WorldModelAdapter
-from world_model_lens.core.config import WorldModelConfig
+from world_model_lens.backends.base_adapter import WorldModelAdapter, AdapterConfig
 
 
 class MLP(nn.Module):
@@ -69,7 +68,7 @@ class VectorEncoder(nn.Module):
 
 
 class DreamerV2Encoder(nn.Module):
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         super().__init__()
         self.config = config
         if config.encoder_type == "cnn":
@@ -174,7 +173,7 @@ class DreamerV2Critic(nn.Module):
 class DreamerV2Adapter(WorldModelAdapter):
     """DreamerV2 with ELU activations and Gaussian rewards."""
 
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         super().__init__(config)
         self.config = config
 

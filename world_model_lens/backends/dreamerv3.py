@@ -5,8 +5,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from world_model_lens.backends.base_adapter import WorldModelAdapter
-from world_model_lens.core.config import WorldModelConfig
+from world_model_lens.backends.base_adapter import WorldModelAdapter, AdapterConfig
 
 
 def symlog(x: torch.Tensor) -> torch.Tensor:
@@ -101,7 +100,7 @@ class VectorEncoder(nn.Module):
 
 
 class DreamerV3Encoder(nn.Module):
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         super().__init__()
         self.config = config
         if config.encoder_type == "cnn":
@@ -220,7 +219,7 @@ class DreamerV3Critic(nn.Module):
 class DreamerV3Adapter(WorldModelAdapter):
     """Full DreamerV3 implementation with RSSM."""
 
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         super().__init__(config)
         self.config = config
 
@@ -237,7 +236,7 @@ class DreamerV3Adapter(WorldModelAdapter):
 
     @classmethod
     def from_checkpoint(
-        cls, path: str, config: Optional[WorldModelConfig] = None
+        cls, path: str, config: Optional[AdapterConfig] = None
     ) -> "DreamerV3Adapter":
         """Load from checkpoint."""
         state_dict = torch.load(path, map_location="cpu")
@@ -248,7 +247,7 @@ class DreamerV3Adapter(WorldModelAdapter):
         return adapter
 
     @classmethod
-    def infer_config(cls, state_dict: Dict) -> WorldModelConfig:
+    def infer_config(cls, state_dict: Dict) -> AdapterConfig:
         """Infer config from state dict shapes."""
         d_z = 0
         d_h = 0
@@ -262,7 +261,7 @@ class DreamerV3Adapter(WorldModelAdapter):
             if "actor.mlp.layers.0.weight" in key and d_action == 0:
                 d_z_plus_action = state_dict[key].shape[1] - d_h
 
-        return WorldModelConfig(d_h=d_h or 512, d_z=d_z or 1024, d_action=d_action or 4)
+        return AdapterConfig(d_h=d_h or 512, d_z=d_z or 1024, d_action=d_action or 4)
 
     def encode(self, obs: torch.Tensor, h_prev: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Encode observation to posterior logits."""

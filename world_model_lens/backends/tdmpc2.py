@@ -8,8 +8,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from world_model_lens.backends.base_adapter import WorldModelAdapter
-from world_model_lens.core.config import WorldModelConfig
+from world_model_lens.backends.base_adapter import WorldModelAdapter, AdapterConfig
 
 
 class ResBlock(nn.Module):
@@ -101,7 +100,7 @@ class TDMPC2Adapter(WorldModelAdapter):
     Continuous latent with no recurrent state. No decoder.
     """
 
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         super().__init__(config)
         self.config = config
 
