@@ -21,7 +21,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from world_model_lens.backends.base_adapter import WorldModelAdapter, WorldModelConfig
+from world_model_lens.backends.base_adapter import WorldModelAdapter, AdapterConfig
 from world_model_lens.core.types import LatentType, DynamicsType, WorldModelFamily
 
 
@@ -120,7 +120,7 @@ class RoboticsAdapter(WorldModelAdapter):
     - Object-centric and part-centric representations
     """
 
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         super().__init__(config)
         self.config = config
 

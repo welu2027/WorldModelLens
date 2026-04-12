@@ -11,10 +11,43 @@ Key Design Principles:
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
+
+
+@dataclass
+class AdapterConfig:
+    """Minimal backend-local config for adapter modules.
+
+    This is intentionally lightweight and exists for backend modules that
+    import their config shape from `world_model_lens.backends.*` rather than
+    the richer project-level `world_model_lens.core.config`.
+    """
+
+    d_state: int = 512
+    d_action: int = 0
+    d_obs: int = 0
+    is_discrete: bool = True
+    n_categories: int = 32
+    n_classes: int = 32
+    name: str = "world_model"
+    model_type: str = "rssm"
+
+    @property
+    def d_h(self) -> int:
+        return self.d_state
+
+    @property
+    def d_z(self) -> int:
+        if self.is_discrete:
+            return self.n_categories * self.n_classes
+        return self.d_state
+
+    @property
+    def d_latent(self) -> int:
+        return self.d_z
 
 
 @dataclass

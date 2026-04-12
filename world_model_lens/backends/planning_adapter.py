@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from world_model_lens.backends.base_adapter import WorldModelAdapter, WorldModelConfig
+from world_model_lens.backends.base_adapter import WorldModelAdapter, AdapterConfig
 
 
 class PlanningAdapter(WorldModelAdapter):
@@ -25,7 +25,7 @@ class PlanningAdapter(WorldModelAdapter):
     No reward or value predictions - planning is goal-based.
     """
 
-    def __init__(self, config: WorldModelConfig, goal_dim: int = 32):
+    def __init__(self, config: AdapterConfig, goal_dim: int = 32):
         super().__init__(config)
         self.goal_dim = goal_dim
 

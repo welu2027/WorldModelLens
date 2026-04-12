@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from world_model_lens.backends.base_adapter import WorldModelAdapter, WorldModelConfig
+from world_model_lens.backends.base_adapter import WorldModelAdapter, AdapterConfig
 
 
 class VideoEncoder(nn.Module):
@@ -74,7 +74,7 @@ class VideoWorldModelAdapter(WorldModelAdapter):
     not just RL agents.
     """
 
-    def __init__(self, config: WorldModelConfig, d_obs: int, frame_shape: Tuple[int, ...]):
+    def __init__(self, config: AdapterConfig, d_obs: int, frame_shape: Tuple[int, ...]):
         super().__init__(config)
         self.d_obs = d_obs
         self.frame_shape = frame_shape
