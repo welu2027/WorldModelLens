@@ -71,6 +71,15 @@ Use probing when the question is: "What information is present in this represent
 - `world_model_lens.patching.TemporalPatcher`
 - cached clean and corrupted runs
 
+### Sparse Autoencoder Note
+
+This repository includes several Sparse Autoencoder (SAE) implementations used
+for disentangling latent features. See the API page for details and examples:
+
+- `docs/api/analysis.md` -> Sparse Autoencoders (SAE)
+  - Example usage and notes: `docs/api/analysis.md`
+
+
 Related API pages:
 - [patching.md](C:\Users\user\Desktop\WorldModelLens\docs\api\patching.md)
 - [core.md](C:\Users\user\Desktop\WorldModelLens\docs\api\core.md)
