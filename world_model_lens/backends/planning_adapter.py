@@ -47,6 +47,12 @@ class PlanningAdapter(BaseModelAdapter):
             nn.Linear(256, config.d_action * 10),
         )
 
+        self.goal_achievement_head = nn.Sequential(
+            nn.Linear(config.d_state + goal_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1),
+        )
+
     def _goal_from_h(
         self,
         h: Optional[torch.Tensor],
@@ -140,4 +146,4 @@ class PlanningAdapter(BaseModelAdapter):
     ) -> torch.Tensor:
         """Predict whether goal is achieved."""
         x = torch.cat([state, goal], dim=-1)
-        return torch.sigmoid(self.planner[2](self.planner[1](self.planner[0](x)[:, :1])))
+        return torch.sigmoid(self.goal_achievement_head(x))

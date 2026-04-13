@@ -207,12 +207,18 @@ class DreamerV1Adapter(BaseModelAdapter):
     def world_model_family(self) -> WorldModelFamily:
         return WorldModelFamily.DREAMER
 
+    def _sample_posterior(self, posterior_params: torch.Tensor) -> torch.Tensor:
+        """Sample a concrete latent from posterior mean/log-scale parameters."""
+        mean, log_std = posterior_params.chunk(2, dim=-1)
+        std = log_std.clamp(-5, 2).exp()
+        return mean + torch.randn_like(std) * std
+
     def encode(
         self,
         obs: torch.Tensor,
         h_prev: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Encode observation to posterior logits."""
+        """Encode observation to a concrete posterior latent."""
         if obs.dim() == 3:
             obs = obs.unsqueeze(0)
 
@@ -224,8 +230,9 @@ class DreamerV1Adapter(BaseModelAdapter):
         if h.shape[0] != obs.shape[0]:
             h = torch.zeros(obs.shape[0], self.config.d_h, device=obs.device)
 
-        posterior_logits = self.posterior(obs_encoding, h)
-        return posterior_logits, obs_encoding
+        posterior_params = self.posterior(obs_encoding, h)
+        z_post = self._sample_posterior(posterior_params)
+        return z_post, obs_encoding
 
     def transition(
         self,
