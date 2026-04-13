@@ -22,6 +22,8 @@ from world_model_lens.backends.ha_schmidhuber import HaSchmidhuberWorldModelAdap
 from world_model_lens.backends.planet import PlaNetAdapter
 from world_model_lens.backends.planning_adapter import PlanningAdapter
 from world_model_lens.backends.tdmpc2 import TDMPC2Adapter
+from world_model_lens.backends.video_adapter import VideoWorldModelAdapter as SimpleVideoAdapter
+from world_model_lens.backends.video_world_model import VideoWorldModelAdapter
 
 
 @dataclass
@@ -138,6 +140,21 @@ def build_tdmpc2() -> tuple[TDMPC2Adapter, AdapterConfig, torch.Tensor, torch.Te
     return adapter, config, obs_seq, action_seq
 
 
+def build_video_adapter() -> tuple[SimpleVideoAdapter, AdapterConfig, torch.Tensor, None]:
+    frame_shape = (3, 64, 64)
+    config = make_config(d_state=32, d_h=32, d_z=32, d_obs=3 * 64 * 64, has_decoder=True)
+    adapter = SimpleVideoAdapter(config=config, d_obs=config.d_obs, frame_shape=frame_shape)
+    obs_seq = torch.randn(4, *frame_shape)
+    return adapter, config, obs_seq, None
+
+
+def build_video_world_model() -> tuple[VideoWorldModelAdapter, AdapterConfig, torch.Tensor, None]:
+    config = make_config(d_embed=32, n_layers=2, n_heads=4, has_decoder=True)
+    adapter = VideoWorldModelAdapter(config)
+    obs_seq = torch.randn(4, 3, 64, 64)
+    return adapter, config, obs_seq, None
+
+
 CASES = [
     AdapterCase("planning", build_planning),
     AdapterCase("decision_transformer", build_decision_transformer),
@@ -145,6 +162,8 @@ CASES = [
     AdapterCase("planet", build_planet),
     AdapterCase("ha_schmidhuber", build_ha_schmidhuber),
     AdapterCase("tdmpc2", build_tdmpc2),
+    AdapterCase("video_adapter", build_video_adapter),
+    AdapterCase("video_world_model", build_video_world_model),
 ]
 
 
