@@ -59,9 +59,9 @@ The library is designed around a minimal interface: any model that implements `e
 
 ```python
 from world_model_lens import HookedWorldModel, WorldModelConfig
-from world_model_lens.backends.generic_adapter import WorldModelAdapter
+from world_model_lens.backends.base_adapter import BaseModelAdapter
 
-class MyModel(WorldModelAdapter):
+class MyModel(BaseModelAdapter):
     def encode(self, obs, context=None):
         z = self.encoder(obs)
         return z, z

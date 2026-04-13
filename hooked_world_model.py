@@ -1,6 +1,6 @@
 """HookedWorldModel — the central interpretability wrapper.
 
-:class:`HookedWorldModel` wraps any :class:`WorldModelAdapter` backend and
+:class:`HookedWorldModel` wraps any :class:`BaseModelAdapter` backend and
 adds a full hook + caching layer on top of it.  Every named activation is
 intercepted at a well-defined point in the forward pass:
 
@@ -60,7 +60,7 @@ from typing import (
 import torch
 from torch import Tensor
 
-from world_model_lens.backends.base_adapter import WorldModelAdapter
+from world_model_lens.backends.base_adapter import BaseModelAdapter
 from world_model_lens.core.activation_cache import ActivationCache
 from world_model_lens.core.config import WorldModelConfig
 from world_model_lens.core.hooks import HookContext, HookPoint, HookRegistry
@@ -76,20 +76,20 @@ log = get_logger(__name__)
 
 #: Global mapping from backend name → adapter *class*.
 #: Register custom backends with ``BACKEND_REGISTRY["my_backend"] = MyAdapter``.
-BACKEND_REGISTRY: dict[str, type[WorldModelAdapter]] = {}
+BACKEND_REGISTRY: dict[str, type[BaseModelAdapter]] = {}
 
 
-def register_backend(name: str) -> Callable[[type[WorldModelAdapter]], type[WorldModelAdapter]]:
+def register_backend(name: str) -> Callable[[type[BaseModelAdapter]], type[BaseModelAdapter]]:
     """Class decorator to register a backend under *name*.
 
     Examples
     --------
     >>> @register_backend("my_dreamer")
-    ... class MyDreamerAdapter(WorldModelAdapter):
+    ... class MyDreamerAdapter(BaseModelAdapter):
     ...     ...
     """
 
-    def decorator(cls: type[WorldModelAdapter]) -> type[WorldModelAdapter]:
+    def decorator(cls: type[BaseModelAdapter]) -> type[BaseModelAdapter]:
         BACKEND_REGISTRY[name] = cls
         return cls
 
@@ -123,7 +123,7 @@ def _safe_scalar(t: Tensor) -> float:
 
 
 class HookedWorldModel:
-    """Interpretability wrapper around any :class:`WorldModelAdapter`.
+    """Interpretability wrapper around any :class:`BaseModelAdapter`.
 
     Parameters
     ----------
@@ -143,11 +143,11 @@ class HookedWorldModel:
 
     def __init__(
         self,
-        adapter: WorldModelAdapter,
+        adapter: BaseModelAdapter,
         cfg: WorldModelConfig,
         name: str = "hooked_wm",
     ) -> None:
-        self._adapter: WorldModelAdapter = adapter.eval()
+        self._adapter: BaseModelAdapter = adapter.eval()
         self._cfg: WorldModelConfig = cfg
         self.name: str = name
         self._registry: HookRegistry = HookRegistry()
@@ -163,8 +163,8 @@ class HookedWorldModel:
         return self._cfg
 
     @property
-    def adapter(self) -> WorldModelAdapter:
-        """The underlying :class:`WorldModelAdapter` backend."""
+    def adapter(self) -> BaseModelAdapter:
+        """The underlying :class:`BaseModelAdapter` backend."""
         return self._adapter
 
     @property
@@ -745,7 +745,7 @@ class HookedWorldModel:
         """All weight matrices from the adapter, plus convenient stacked forms.
 
         Returns every parameter tensor with ``ndim >= 2`` (matrices, not bias
-        vectors or scalars) from :meth:`WorldModelAdapter.named_parameters`.
+        vectors or scalars) from :meth:`BaseModelAdapter.named_parameters`.
 
         Additionally, parameters that share a common dot-prefix
         (e.g. ``"rnn.weight_ih_l0"`` and ``"rnn.weight_hh_l0"``) are
@@ -833,7 +833,7 @@ class HookedWorldModel:
         """Instantiate a :class:`HookedWorldModel` from a saved checkpoint.
 
         Looks up *backend* in :data:`BACKEND_REGISTRY` to find the correct
-        :class:`WorldModelAdapter` subclass, then delegates to that class's
+        :class:`BaseModelAdapter` subclass, then delegates to that class's
         ``from_checkpoint(path, cfg, **kwargs)`` classmethod.
 
         Parameters

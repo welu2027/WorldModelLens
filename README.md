@@ -150,9 +150,9 @@ pip install world-model-lens[dev,viz,api,docs]
 
 ```python
 from world_model_lens import WorldModelConfig
-from world_model_lens.backends.generic_adapter import WorldModelAdapter
+from world_model_lens.backends.base_adapter import BaseModelAdapter
 
-class MyWorldModel(WorldModelAdapter):
+class MyWorldModel(BaseModelAdapter):
     def encode(self, obs, context=None):
         # Required: convert observation to latent state
         state = self.encoder(obs)
@@ -350,7 +350,7 @@ world_model_lens/
 │   └── activation_cache.py   # Activation caching
 │
 ├── backends/                  # Model adapters (implement these)
-│   ├── generic_adapter.py    # Abstract base class
+│   ├── base_adapter.py       # Abstract base class
 │   ├── dreamerv3.py         # DreamerV3 implementation
 │   ├── dreamerv2.py         # DreamerV2 implementation
 │   ├── dreamerv1.py         # DreamerV1 implementation
@@ -523,9 +523,9 @@ report = safety.run_safety_audit(traj)
 ### Creating Custom Adapters
 
 ```python
-from world_model_lens.backends.generic_adapter import WorldModelAdapter
+from world_model_lens.backends.base_adapter import BaseModelAdapter
 
-class MyAdapter(WorldModelAdapter):
+class MyAdapter(BaseModelAdapter):
     def __init__(self, config):
         super().__init__(config)
         self.encoder = nn.Linear(config.d_obs, config.d_state)
