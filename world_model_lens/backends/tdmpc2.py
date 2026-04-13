@@ -8,7 +8,7 @@ from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from world_model_lens.backends.base_adapter import BaseModelAdapter, AdapterConfig
+from world_model_lens.backends.base_adapter import BaseModelAdapter, AdapterConfig, WorldModelCapabilities
 
 
 class ResBlock(nn.Module):
@@ -111,6 +111,16 @@ class TDMPC2Adapter(BaseModelAdapter):
         self.policy = PolicyHead(self.latent_dim, config.d_action)
         self.value = ValueHead(self.latent_dim, self.latent_dim)
 
+        self._capabilities = WorldModelCapabilities(
+            has_decoder=False,
+            has_reward_head=True,
+            has_continue_head=True,
+            has_actor=True,
+            has_critic=True,
+            uses_actions=True,
+            is_rl_trained=True,
+        )
+
         self._device = torch.device("cpu")
 
     def encode(self, obs: torch.Tensor, h_prev: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -127,14 +137,20 @@ class TDMPC2Adapter(BaseModelAdapter):
         return self.dynamics_model(h, action)
 
     def dynamics(self, h: torch.Tensor) -> torch.Tensor:
-        return h
+        return h if h.dim() > 1 else h.unsqueeze(0)
 
-    def decode(self, h: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
+    def sample_z(
+        self,
+        logits_or_repr: torch.Tensor,
+        temperature: float = 1.0,
+        sample: bool = True,
+    ) -> torch.Tensor:
+        del temperature, sample
+        return logits_or_repr
+
+    def decode(self, h: torch.Tensor, z: torch.Tensor) -> None:
         del h, z
-        raise NotImplementedError(
-            "TD-MPC2 has no decoder. The model uses continuous latent "
-            "and learns implicitly through MPC planning."
-        )
+        return None
 
     def predict_reward(self, h: torch.Tensor, z: torch.Tensor) -> torch.Tensor:
         if h.dim() == 1:
@@ -160,11 +176,18 @@ class TDMPC2Adapter(BaseModelAdapter):
             z = z.unsqueeze(0)
         return self.value(h, z)
 
-    def transition(self, h: torch.Tensor, z: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
+    def transition(
+        self,
+        h: torch.Tensor,
+        z: torch.Tensor,
+        action: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         del h
         if z.dim() == 1:
             z = z.unsqueeze(0)
-        if action.dim() == 1:
+        if action is None:
+            action = torch.zeros(z.shape[0], self.config.d_action, device=z.device)
+        elif action.dim() == 1:
             action = action.unsqueeze(0)
         return self.dynamics_model(z, action)
 

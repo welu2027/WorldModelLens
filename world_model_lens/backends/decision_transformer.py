@@ -211,6 +211,20 @@ class DecisionTransformerAdapter(BaseModelAdapter):
         _, state_preds = self.transformer(z, action, returns, timesteps)
         return state_preds[:, 1]
 
+    def dynamics(self, h: torch.Tensor) -> torch.Tensor:
+        """Decision Transformer uses the current observation-space state as its prior."""
+        return h if h.dim() > 1 else h.unsqueeze(0)
+
+    def sample_z(
+        self,
+        logits_or_repr: torch.Tensor,
+        temperature: float = 1.0,
+        sample: bool = True,
+    ) -> torch.Tensor:
+        """Decision Transformer state carriers are continuous representations."""
+        del temperature, sample
+        return logits_or_repr
+
     def decode(self, h: torch.Tensor, z: torch.Tensor) -> None:
         """No decoder in Decision Transformer."""
         del h, z

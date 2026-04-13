@@ -219,6 +219,28 @@ class HaSchmidhuberWorldModelAdapter(BaseModelAdapter):
         h_next, _, _, _ = self.mdn_rnn(z, h, action)
         return h_next
 
+    def dynamics(self, h: torch.Tensor) -> torch.Tensor:
+        """Sample the next latent prior from the MDN parameters predicted from h."""
+        if h.dim() == 1:
+            h = h.unsqueeze(0)
+        batch_size = h.shape[0]
+        mdn_output = self.mdn_rnn.mdn_fc(h)
+        mdn_output = mdn_output.view(batch_size, self.config.d_z, self.mdn_rnn.n_mixtures, 3)
+        pi = F.softmax(mdn_output[..., 0], dim=-1)
+        mu = mdn_output[..., 1]
+        log_sigma = mdn_output[..., 2]
+        return self.mdn_rnn.sample_next_z(pi, mu, log_sigma)
+
+    def sample_z(
+        self,
+        logits_or_repr: torch.Tensor,
+        temperature: float = 1.0,
+        sample: bool = True,
+    ) -> torch.Tensor:
+        """Ha/Schmidhuber uses continuous VAE latents, so priors pass through directly."""
+        del temperature, sample
+        return logits_or_repr
+
     def decode(self, h: torch.Tensor, z: torch.Tensor) -> Optional[torch.Tensor]:
         """Decode latent to observation with the VAE decoder."""
         del h

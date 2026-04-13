@@ -109,6 +109,20 @@ class PlanningAdapter(BaseModelAdapter):
         x = torch.cat([z, action], dim=-1)
         return self.transition_model(x)
 
+    def dynamics(self, h: torch.Tensor) -> torch.Tensor:
+        """Planning adapter uses the hidden state itself as the next latent prior."""
+        return h if h.dim() > 1 else h.unsqueeze(0)
+
+    def sample_z(
+        self,
+        logits_or_repr: torch.Tensor,
+        temperature: float = 1.0,
+        sample: bool = True,
+    ) -> torch.Tensor:
+        """Planning latents are continuous representations, not categorical logits."""
+        del temperature, sample
+        return logits_or_repr
+
     def plan(
         self,
         current_state: torch.Tensor,
