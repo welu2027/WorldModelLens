@@ -1,44 +1,74 @@
 from __future__ import annotations
-"""Activation cache for storing and retrieving intermediate activations."""
 
 from collections.abc import Callable, Iterable
 from typing import Any
 
 import pandas as pd
 import torch
+import torch.distributions as dist
 
 
 class ActivationCache:
     """Storage for activations keyed by (component_name, timestep).
 
     Supports single-item access, slicing, lazy evaluation, and export.
+    Now supports storing torch.distributions.Distribution objects and dicts
+    with distribution parameters for uncertainty analysis.
+
+    Key Features:
+    - Store tensors, distributions, dicts, or lazy callables
+    - Automatic mean extraction from distributions for backward compatibility
+    - Enhanced KL divergence computation for uncertainty analysis
+    - Distribution parameter access for variance analysis
 
     Example:
         cache = ActivationCache()
-        cache["z_posterior", 0] = tensor
-        single = cache["z_posterior", 0]           # Single tensor
-        sequence = cache["z_posterior", :]          # Stacked tensors
-        sequence = cache["z_posterior", slice(0,5)] # Slice
+
+        # Store tensor (backward compatible)
+        cache["z_posterior", 0] = torch.randn(64)
+
+        # Store distribution for uncertainty analysis
+        import torch.distributions as dist
+        cache["z_posterior", 0] = dist.Normal(mean, std)
+
+        # Access (returns mean for backward compatibility)
+        posterior = cache["z_posterior", 0]  # tensor
+
+        # Check if stored value is a distribution
+        if cache.is_distribution("z_posterior", 0):
+            params = cache.get_distribution_params("z_posterior", 0)
+            variance = params["variance"]  # access uncertainty
+
+        # Slicing works with all types
+        sequence = cache["z_posterior", :]  # stacked means
     """
 
     def __init__(self):
-        self._store: dict[tuple[str, int], torch.Tensor | Callable[[], torch.Tensor]] = {}
-        self._evaluated: dict[tuple[str, int], torch.Tensor] = {}
+        self._store: dict[
+            tuple[str, int],
+            torch.Tensor | Callable[[], torch.Tensor] | dist.Distribution | dict[str, Any],
+        ] = {}
+        self._evaluated: dict[
+            tuple[str, int], torch.Tensor | dist.Distribution | dict[str, Any]
+        ] = {}
 
     def __getitem__(
         self, key: str | tuple[str, int] | tuple[str, slice] | tuple[str, str]
     ) -> torch.Tensor:
         """Access cached activations.
 
+        For backward compatibility, when distributions are stored, returns the mean tensor.
+        Use get_distribution_params() to access full distribution parameters.
+
         Args:
             key: Either:
-                - (name, timestep): Single tensor
+                - (name, timestep): Single tensor (mean if distribution stored)
                 - (name, slice): Tensor sequence via slice
                 - (name, ':'): All timesteps stacked
                 - name: All timesteps stacked
 
         Returns:
-            torch.Tensor: Requested activation(s).
+            torch.Tensor: Requested activation(s). For distributions, returns the mean.
         """
         if isinstance(key, str):
             return self._get_all(key)
@@ -61,13 +91,32 @@ class ActivationCache:
             raise KeyError(f"No cached activation for {name} at t={timestep}")
 
         if key in self._evaluated:
-            return self._evaluated[key]
+            value = self._evaluated[key]
+        else:
+            value = self._store[key]
+            if callable(value):
+                value = value()
+                self._evaluated[key] = value
 
-        value = self._store[key]
-        if callable(value):
-            value = value()
-            self._evaluated[key] = value
-        return value
+        # Handle different types of stored values
+        if isinstance(value, torch.Tensor):
+            return value
+        elif isinstance(value, dist.Distribution):
+            return value.mean
+        elif isinstance(value, dict):
+            # Return tensor/mean if available
+            if "tensor" in value:
+                return value["tensor"]
+            elif "mean" in value:
+                return value["mean"]
+            else:
+                # If no tensor available, return a placeholder or raise error
+                # For backward compatibility, assume dict contains the data
+                raise ValueError(
+                    f"Dict stored for {name},{timestep} does not contain 'tensor' or 'mean' key"
+                )
+        else:
+            raise ValueError(f"Unsupported stored value type: {type(value)}")
 
     def _get_all(self, name: str) -> torch.Tensor:
         """Get all timesteps stacked."""
@@ -83,17 +132,45 @@ class ActivationCache:
         return torch.stack([self._get_single(name, t) for t in sliced], dim=0)
 
     def __setitem__(
-        self, key: tuple[str, int], value: torch.Tensor | Callable[[], torch.Tensor]
+        self,
+        key: tuple[str, int],
+        value: torch.Tensor | Callable[[], torch.Tensor] | dist.Distribution | dict[str, Any],
     ) -> None:
         """Store an activation.
 
         Args:
             key: Tuple of (component_name, timestep).
-            value: Tensor or lazy callable.
+            value: Activation to store. Can be:
+                - torch.Tensor: Raw activation tensor
+                - Callable: Lazy evaluation function returning tensor/distribution/dict
+                - torch.distributions.Distribution: Full distribution for uncertainty analysis
+                - dict: Dictionary with distribution parameters (e.g., {"mean": tensor, "std": tensor})
         """
         name, timestep = key
         self._store[key] = value
         self._evaluated.pop(key, None)
+
+    def store(self, name: str, timestep: int, value: torch.Tensor) -> None:
+        """Public helper to store a concrete tensor for (name, timestep)."""
+        self[name, timestep] = value
+
+    def set_prior_equivalent(
+        self,
+        timestep: int,
+        logits: torch.Tensor,
+        probs: torch.Tensor,
+        names_filter: list[str] | None = None,
+    ) -> None:
+        """Store prior-equivalent entries for timestep when posterior==prior.
+
+        Writes both ``z_prior.logits`` and ``z_prior`` for convenience. If
+        *names_filter* is provided, only writes components present in the
+        filter.
+        """
+        if names_filter is None or "z_prior.logits" in names_filter:
+            self["z_prior.logits", timestep] = logits
+        if names_filter is None or "z_prior" in names_filter:
+            self["z_prior", timestep] = probs
 
     def __contains__(self, key: tuple[str, int]) -> bool:
         """Check if a key exists in the cache."""
@@ -134,8 +211,15 @@ class ActivationCache:
             if isinstance(val, torch.Tensor):
                 self._store[key] = val.to(device)
                 self._evaluated.pop(key, None)
+            elif isinstance(val, dist.Distribution):
+                # Distributions don't have to_device, but their parameters might
+                pass  # For now, assume distributions are handled elsewhere
         for key in list(self._evaluated.keys()):
-            self._evaluated[key] = self._evaluated[key].to(device)
+            val = self._evaluated[key]
+            if isinstance(val, torch.Tensor):
+                self._evaluated[key] = val.to(device)
+            elif isinstance(val, dist.Distribution):
+                pass
         return self
 
     def detach(self) -> "ActivationCache":
@@ -145,8 +229,16 @@ class ActivationCache:
             if isinstance(val, torch.Tensor):
                 self._store[key] = val.detach()
                 self._evaluated.pop(key, None)
+            elif isinstance(val, dist.Distribution):
+                # For distributions, we can't detach them directly, but their parameters
+                # should be detached when evaluated. For now, leave as is.
+                pass
         for key in list(self._evaluated.keys()):
-            self._evaluated[key] = self._evaluated[key].detach()
+            val = self._evaluated[key]
+            if isinstance(val, torch.Tensor):
+                self._evaluated[key] = val.detach()
+            elif isinstance(val, dist.Distribution):
+                pass
         return self
 
     def filter(self, names: list[str]) -> "ActivationCache":
@@ -167,23 +259,74 @@ class ActivationCache:
     def surprise(self) -> torch.Tensor:
         """Compute per-timestep KL divergence (surprise) between z_posterior and z_prior.
 
+        Supports both tensor and distribution inputs. When distributions are stored,
+        uses torch.distributions.kl_divergence() for accurate computation.
+
         Returns:
-            Tensor of shape [T] with KL values per timestep.
+            Tensor of shape [T] with KL values per timestep. Higher values indicate
+            more surprising predictions (larger variance spikes).
         """
         try:
-            posterior = self["z_posterior"]
-            prior = self["z_prior"]
-            total_steps = int(posterior.shape[0])
-            kl_vals: list[float] = []
-            for t in range(total_steps):
-                p = posterior[t]
-                q = prior[t]
-                p = p.clamp(min=1e-8)
-                q = q.clamp(min=1e-8)
-                p = p / p.sum(dim=-1, keepdim=True)
-                q = q / q.sum(dim=-1, keepdim=True)
-                kl = (p * (p.log() - q.log())).sum(dim=-1)
-                kl_vals.append(kl.sum().item())
+            posterior_vals = []
+            prior_vals = []
+            timesteps = sorted({t for n, t in self._store.keys() if n == "z_posterior"})
+            if not timesteps:
+                raise KeyError("No z_posterior found")
+
+            for t in timesteps:
+                post_key = ("z_posterior", t)
+                prior_key = ("z_prior", t)
+
+                if post_key in self._store:
+                    post_val = self._store[post_key]
+                elif post_key in self._evaluated:
+                    post_val = self._evaluated[post_key]
+                else:
+                    raise KeyError(f"No z_posterior at t={t}")
+
+                if prior_key in self._store:
+                    prior_val = self._store[prior_key]
+                elif prior_key in self._evaluated:
+                    prior_val = self._evaluated[prior_key]
+                else:
+                    raise KeyError(f"No z_prior at t={t}")
+
+                posterior_vals.append(post_val)
+                prior_vals.append(prior_val)
+
+            kl_vals = []
+            for p_val, q_val in zip(posterior_vals, prior_vals):
+                if isinstance(p_val, dist.Distribution) and isinstance(q_val, dist.Distribution):
+                    # Use torch.distributions KL divergence
+                    kl = dist.kl_divergence(p_val, q_val).sum(dim=-1)
+                    kl_vals.append(kl.item())
+                elif isinstance(p_val, dist.Distribution) and isinstance(q_val, torch.Tensor):
+                    # posterior is distribution, prior is tensor
+                    p_probs = p_val.mean  # Use mean as approximation
+                    kl = (p_probs * (p_probs.log() - q_val.log())).sum(dim=-1)
+                    kl_vals.append(kl.item())
+                elif isinstance(p_val, torch.Tensor) and isinstance(q_val, dist.Distribution):
+                    # posterior is tensor, prior is distribution
+                    q_probs = q_val.mean  # Use mean as approximation
+                    kl = (p_val * (p_val.log() - q_probs.log())).sum(dim=-1)
+                    kl_vals.append(kl.item())
+                else:
+                    # Fallback to manual KL calculation for tensors
+                    p = (
+                        p_val.clamp(min=1e-8)
+                        if isinstance(p_val, torch.Tensor)
+                        else p_val.mean.clamp(min=1e-8)
+                    )
+                    q = (
+                        q_val.clamp(min=1e-8)
+                        if isinstance(q_val, torch.Tensor)
+                        else q_val.mean.clamp(min=1e-8)
+                    )
+                    p = p / p.sum(dim=-1, keepdim=True)
+                    q = q / q.sum(dim=-1, keepdim=True)
+                    kl = (p * (p.log() - q.log())).sum(dim=-1)
+                    kl_vals.append(kl.sum().item())
+
             return torch.tensor(kl_vals)
         except KeyError as err:
             raise KeyError("Cache must contain z_posterior and z_prior for surprise()") from err
@@ -343,6 +486,80 @@ class ActivationCache:
 
         return self
 
+    def set_prior_equivalent(
+        self,
+        timestep: int,
+        logits: torch.Tensor,
+        probs: torch.Tensor,
+        names_filter: list[str] | None = None,
+    ) -> None:
+        """Store prior-equivalent entries for timestep when posterior==prior.
+
+        Writes both ``z_prior.logits`` and ``z_prior`` for convenience. If
+        *names_filter* is provided, only writes components present in the
+        filter.
+        """
+        if names_filter is None or "z_prior.logits" in names_filter:
+            self["z_prior.logits", timestep] = logits
+        if names_filter is None or "z_prior" in names_filter:
+            self["z_prior", timestep] = probs
+
+    def get_distribution_params(self, name: str, timestep: int) -> dict[str, Any]:
+        """Get distribution parameters for uncertainty analysis.
+
+        Args:
+            name: Component name
+            timestep: Timestep
+
+        Returns:
+            Dict with keys like 'mean', 'std', 'variance', etc.
+        """
+        key = (name, timestep)
+        if key not in self._store and key not in self._evaluated:
+            raise KeyError(f"No cached activation for {name} at t={timestep}")
+
+        if key in self._evaluated:
+            value = self._evaluated[key]
+        else:
+            value = self._store[key]
+            if callable(value):
+                value = value()
+                self._evaluated[key] = value
+
+        if isinstance(value, dist.Distribution):
+            params = {"mean": value.mean}
+            if hasattr(value, "stddev"):
+                params["std"] = value.stddev
+            if hasattr(value, "variance"):
+                params["variance"] = value.variance
+            return params
+        elif isinstance(value, dict):
+            return value
+        else:
+            # For tensors, assume it's the mean
+            return {"mean": value}
+
+    def is_distribution(self, name: str, timestep: int) -> bool:
+        """Check if the cached value for (name, timestep) is a distribution.
+
+        Args:
+            name: Component name
+            timestep: Timestep
+
+        Returns:
+            True if the stored value is a torch.distributions.Distribution
+        """
+        key = (name, timestep)
+        if key in self._evaluated:
+            return isinstance(self._evaluated[key], dist.Distribution)
+        elif key in self._store:
+            val = self._store[key]
+            if callable(val):
+                # Don't evaluate callable
+                return False
+            return isinstance(val, dist.Distribution)
+        return False
+
     def estimate_memory_gb(self) -> float:
         """Predict RAM usage before materializing all callables.
 
@@ -352,9 +569,15 @@ class ActivationCache:
         total_bytes = 0
         for key, val in self._store.items():
             if key in self._evaluated:
-                total_bytes += self._evaluated[key].element_size() * self._evaluated[key].nelement()
+                eval_val = self._evaluated[key]
+                if isinstance(eval_val, torch.Tensor):
+                    total_bytes += eval_val.element_size() * eval_val.nelement()
             elif isinstance(val, torch.Tensor):
                 total_bytes += val.element_size() * val.nelement()
+            elif isinstance(val, dist.Distribution):
+                # Estimate based on distribution parameters
+                # This is approximate
+                total_bytes += 4 * 1024 * 1024
             elif callable(val):
                 estimated_size = 4 * 1024 * 1024
                 total_bytes += estimated_size

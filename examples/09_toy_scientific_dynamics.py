@@ -26,6 +26,12 @@ from world_model_lens.backends.toy_scientific_model import (
     generate_lorenz_trajectory,
     generate_pendulum_trajectory,
 )
+from world_model_lens.visualization import plot_scientific_dynamics_dashboard
+import pathlib
+import matplotlib.pyplot as plt
+
+OUTPUT_DIR = pathlib.Path("assets/examples")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def create_scientific_model(obs_dim: int = 3, latent_dim: int = 16):
@@ -139,6 +145,8 @@ def main():
 
     print("\n[9] Comparing with pendulum dynamics...")
     pendulum_traj = generate_pendulum_trajectory(n_steps=100)
+    # Pad pendulum trajectory to match model input dimension (3)
+    pendulum_traj = torch.cat([pendulum_traj, torch.zeros(pendulum_traj.shape[0], 1)], dim=1)
     traj2, cache2 = wm.run_with_cache(pendulum_traj)
 
     surprise2 = belief_analyzer.surprise_timeline(cache2)
@@ -146,7 +154,17 @@ def main():
 
     traj_metrics2 = geometry_analyzer.trajectory_metrics(cache2, component="z_posterior")
     print(f"    Pendulum trajectory distance: {traj_metrics2.mean_trajectory_distance:.4f}")
-
+    
+    print("\n[10] Plotting scientific dynamics dashboard...")
+    fig = plot_scientific_dynamics_dashboard(
+        lorenz_traj_raw=lorenz_traj,
+        traj_lorenz=traj,
+        traj_pendulum=traj2,
+        dep_result=dep_result,
+        mem_result=mem_result,
+        output_path=OUTPUT_DIR / "toy_scientific_dynamics_dashboard.png",
+    )
+    plt.show()
     print("\n" + "=" * 60)
     print("Summary: Scientific dynamics analysis complete!")
     print("=" * 60)
@@ -157,6 +175,7 @@ def main():
     print("  - Temporal memory shows dynamics predictability")
     print("  - RL-specific analysis gracefully skipped")
     print()
+    
 
 
 if __name__ == "__main__":

@@ -18,6 +18,9 @@ from world_model_lens.core.activation_cache import ActivationCache
 from world_model_lens.core.world_state import WorldState
 from world_model_lens.core.world_trajectory import WorldTrajectory
 from world_model_lens.backends.base_adapter import WorldModelCapabilities
+from world_model_lens.core.hook_cache import HookCacheManager
+from world_model_lens.core.forward_runner import ForwardRunner
+from world_model_lens.core.latent_trajectory import LatentTrajectory
 
 
 class HookedWorldModel:
@@ -70,10 +73,41 @@ class HookedWorldModel:
         self.config = config
         self.name = name
         self._hooks = HookRegistry()
+        # Central manager that applies hooks and writes to ActivationCache.
+        # Attaching it here lets ForwardRunner or other orchestrators use
+        # a single canonical implementation instead of reaching into
+        # HookRegistry/ActivationCache internals.
+        self._hook_cache_manager = HookCacheManager(self._hooks)
         self._device = torch.device("cpu")
         self._uses_capabilities_adapter_api = isinstance(
             getattr(type(self.adapter), "capabilities", None), property
         )
+
+    def _apply_and_cache(
+        self,
+        name: str,
+        t: int,
+        tensor: torch.Tensor,
+        ctx: HookContext,
+        cache: Optional[ActivationCache],
+        names_filter: Optional[List[str]],
+    ) -> torch.Tensor:
+        """Apply hooks via registry, then optionally write to ActivationCache.
+
+        This centralizes hook application + caching semantics used across
+        run_with_cache so all writes go through the same pipeline.
+        """
+        # Prefer the mounted HookCacheManager to centralize behavior; fall
+        # back to the local registry if the manager is not present for any
+        # reason (backwards-compatible shim).
+        manager = getattr(self, "_hook_cache_manager", None)
+        if manager is not None:
+            return manager.apply_and_cache(name, t, tensor, ctx, cache, names_filter)
+
+        tensor = self._hooks.apply(name, t, tensor, ctx)
+        if cache is not None and (names_filter is None or name in names_filter):
+            cache[name, t] = tensor.detach()
+        return tensor
 
     def _get_capabilities(self) -> WorldModelCapabilities:
         """Return adapter capabilities with a backward-compatible fallback.
@@ -162,7 +196,7 @@ class HookedWorldModel:
         self,
         observations: torch.Tensor,
         actions: Optional[torch.Tensor] = None,
-        names_filter: Optional[List[str]] = None,
+        names_filter: Optional[set] = None,
         device: Optional[torch.device] = None,
         store_logits: bool = True,
     ) -> Tuple[WorldTrajectory, ActivationCache]:
@@ -185,6 +219,10 @@ class HookedWorldModel:
         Returns:
             Tuple of (WorldTrajectory, ActivationCache)
         """
+        # normalize names_filter to a set for efficient membership tests
+        # normalize names_filter to a set[str] for efficient membership checks
+        names_filter = set(names_filter) if names_filter is not None else None
+
         T = observations.shape[0]
         cache = ActivationCache()
         states = []
@@ -202,6 +240,240 @@ class HookedWorldModel:
         if state.dim() > 1 and state.shape[0] == 1:
             state = state.squeeze(0)
 
+        # Use ForwardRunner only when the adapter implements the newer
+        # latent-style encode signature (encode(obs) -> embedding) so we
+        # avoid breaking legacy adapters that require an h_prev/context arg.
+        use_forward_runner = False
+        try:
+            import inspect
+
+            sig = inspect.signature(self.adapter.encode)
+            # parameters includes 'self' so 2 means (self, obs)
+            if (
+                len(sig.parameters) <= 1
+                and hasattr(self.adapter, "dynamics")
+                and hasattr(self.adapter, "initial_state")
+            ):
+                use_forward_runner = True
+        except Exception:
+            use_forward_runner = False
+
+        # Disable ForwardRunner automatic path for now to preserve backward
+        # compatibility with the wide variety of adapter signatures in the
+        # repo. The ForwardRunner integration can be re-enabled behind an
+        # explicit opt-in once adapters converge on a stable API.
+        use_forward_runner = False
+
+        if use_forward_runner:
+            # Probe the adapter's encode return type to ensure it returns a
+            # single tensor (observation embedding). Some adapters accept a
+            # single-argument encode but still return (posterior, obs_enc)
+            # tuples — avoid using ForwardRunner in that case.
+            probe_ok = False
+            try:
+                with torch.no_grad():
+                    sample = observations[0]
+                    out = self.adapter.encode(sample)
+                if isinstance(out, torch.Tensor):
+                    probe_ok = True
+            except Exception:
+                probe_ok = False
+
+            if not probe_ok:
+                use_forward_runner = False
+
+        if use_forward_runner:
+            # Build a thin shim exposing the helpers ForwardRunner expects.
+            class _Shim:
+                def __init__(self, parent: "HookedWorldModel"):
+                    self._parent = parent
+                    self.name = parent.name
+                    # reuse the shared hook cache manager so hooks and caching
+                    # behave identically to the existing run_with_cache pipeline.
+                    self._hook_cache_manager = parent._hook_cache_manager
+
+                    # Adapter shim: expose a simplified encode(obs) -> Tensor
+                    # API expected by ForwardRunner while delegating to the
+                    # real adapter under the hood.
+                    class AdapterShim:
+                        def __init__(self, real):
+                            self._real = real
+
+                        def __getattr__(self, name):
+                            return getattr(self._real, name)
+
+                        def initial_state(self):
+                            # try no-arg then fall back to common signature
+                            try:
+                                return self._real.initial_state()
+                            except TypeError:
+                                try:
+                                    return self._real.initial_state(batch_size=1)
+                                except Exception:
+                                    return self._real.initial_state
+
+                        def encode(self, obs):
+                            # Try multiple adapter encode signatures and return
+                            # a single tensor. Prefer posterior probabilities if
+                            # the adapter returns (logits, probs) pairs.
+                            def _first_tensor(x):
+                                if isinstance(x, torch.Tensor):
+                                    return x
+                                if isinstance(x, (tuple, list)):
+                                    for el in x:
+                                        t = _first_tensor(el)
+                                        if t is not None:
+                                            return t
+                                return None
+
+                            try:
+                                out = self._real.encode(obs)
+                            except TypeError:
+                                try:
+                                    out = self._real.encode(obs, None)
+                                except Exception:
+                                    raise
+
+                            if isinstance(out, torch.Tensor):
+                                return out
+                            if isinstance(out, (tuple, list)):
+                                # common shapes: (posterior, obs_enc) or
+                                # ((logits, probs), obs_enc). Prefer probs when
+                                # available, otherwise first tensor.
+                                first = out[0]
+                                if isinstance(first, (tuple, list)) and len(first) > 1:
+                                    # try probs at index 1
+                                    if isinstance(first[1], torch.Tensor):
+                                        return first[1]
+                                t = _first_tensor(out)
+                                if t is not None:
+                                    return t
+                            raise TypeError("Adapter.encode returned unsupported type")
+
+                    self._adapter = AdapterShim(parent.adapter)
+
+                def _encode(self, obs, t, ctx, cache, names_filter):
+                    post = self._adapter.encode(obs.unsqueeze(0))
+                    return post.squeeze(0)
+
+                def _dynamics_and_prior(self, h, z, a_prev, t, ctx, cache, names_filter):
+                    prior = self._adapter.dynamics(h.unsqueeze(0) if h.dim() == 1 else h)
+                    prior = prior.squeeze(0) if prior.dim() > 1 else prior
+                    # return h (unchanged), raw logits (prior), and prior prob
+                    return h, prior, prior
+
+                def _posterior(self, h, obs_emb, t, ctx, cache, names_filter):
+                    # The adapter.encode call above produced the posterior; here
+                    # we interpret obs_emb as the posterior for compatibility.
+                    return obs_emb, obs_emb
+
+                def _compute_kl_and_cache(self, z_post, z_prior, t, ctx, cache, names_filter):
+                    # Compute KL if shapes match, otherwise None.
+                    if z_post.shape == z_prior.shape and z_post.dim() > 1:
+                        p = z_post.clamp(min=1e-8)
+                        q = z_prior.clamp(min=1e-8)
+                        p = p / p.sum(dim=-1, keepdim=True)
+                        q = q / q.sum(dim=-1, keepdim=True)
+                        kl = (p * (p.log() - q.log())).sum(dim=-1)
+                        return kl
+                    return None
+
+                def _compute_heads(self, h, z_post, t, ctx, cache, names_filter):
+                    # Delegate reward/value/actor predictions to adapter when
+                    # available to preserve existing behavior.
+                    reward = None
+                    value = None
+                    actor_logits = None
+                    caps = self._parent._get_capabilities()
+                    if caps.has_reward_head:
+                        try:
+                            reward = self._adapter.predict_reward(
+                                h.unsqueeze(0), z_post.unsqueeze(0)
+                            )
+                            if reward is not None:
+                                reward = reward.squeeze(0)
+                        except NotImplementedError:
+                            reward = None
+                    if caps.has_critic:
+                        try:
+                            if hasattr(self._adapter, "critic_forward"):
+                                value = self._adapter.critic_forward(
+                                    h.unsqueeze(0), z_post.unsqueeze(0)
+                                )
+                            else:
+                                value = self._adapter.predict_value(h.unsqueeze(0), None)
+                            if value is not None:
+                                value = value.squeeze(0)
+                        except NotImplementedError:
+                            value = None
+                    return reward, None, actor_logits, value
+
+                def _build_state(
+                    self,
+                    h,
+                    z_post_prob,
+                    z_prior_prob,
+                    t,
+                    action_seq,
+                    reward_val,
+                    cont_val,
+                    actor_logits_out,
+                    value_val,
+                ):
+                    return LatentTrajectory(states=[], env_name=self.name, episode_id=None)
+
+                def _apply_and_cache(self, name, t, tensor, ctx, cache, names_filter):
+                    return self._parent._apply_and_cache(name, t, tensor, ctx, cache, names_filter)
+
+                def _cache_prior_equivalent_at_t0(self, raw, prob, t, cache, names_filter):
+                    if cache is not None:
+                        try:
+                            cache.set_prior_equivalent(
+                                t,
+                                raw.detach(),
+                                prob.detach(),
+                                list(names_filter) if names_filter is not None else None,
+                            )
+                        except Exception:
+                            pass
+
+            shim = _Shim(self)
+            runner = ForwardRunner(shim)
+            latent_traj = runner.run_forward(
+                observations,
+                actions if actions is not None else torch.zeros_like(observations),
+                cache,
+                names_filter,
+                no_grad=True,
+            )
+            # Convert LatentTrajectory -> WorldTrajectory (best-effort)
+            states_out = []
+            for i, s in enumerate(latent_traj.states):
+                # try to extract common fields, fallback to placeholders
+                try:
+                    h = s.h_t
+                except Exception:
+                    h = torch.zeros(1)
+                try:
+                    z_post = s.z_posterior
+                except Exception:
+                    z_post = torch.zeros(1)
+                ws = WorldState(
+                    state=h.clone(),
+                    timestep=i,
+                    action=None,
+                    action_source=None,
+                    reward_pred=getattr(s, "reward_pred", None),
+                    value_pred=getattr(s, "value_pred", None),
+                    obs_encoding=getattr(s, "obs_encoding", None),
+                )
+                states_out.append(ws)
+            traj = WorldTrajectory(states=states_out, source="real")
+            if device:
+                traj = traj.to_device(device)
+                cache = cache.to_device(device)
+            return traj, cache
+
         for t in range(T):
             obs = observations[t]
             action = None
@@ -209,7 +481,8 @@ class HookedWorldModel:
                 action = actions[t]
 
             hook_ctx = HookContext(timestep=t, component="state", trajectory_so_far=states)
-            state = self._hooks.apply("state", t, state, hook_ctx)
+            # apply hooks and cache via central helper
+            state = self._apply_and_cache("state", t, state, hook_ctx, cache, names_filter)
 
             posterior, obs_encoding = self.adapter.encode(
                 obs.unsqueeze(0), state.unsqueeze(0) if state.dim() == 1 else state
@@ -217,7 +490,9 @@ class HookedWorldModel:
             posterior = posterior.squeeze(0)
 
             hook_ctx_z = HookContext(timestep=t, component="z_posterior", trajectory_so_far=states)
-            posterior = self._hooks.apply("z_posterior", t, posterior, hook_ctx_z)
+            posterior = self._apply_and_cache(
+                "z_posterior", t, posterior, hook_ctx_z, cache, names_filter
+            )
 
             obs_encoding = obs_encoding.squeeze(0) if obs_encoding is not None else None
 
@@ -226,12 +501,28 @@ class HookedWorldModel:
             )
             prior = prior.squeeze(0) if prior.dim() > 1 else prior
 
-            cache["state", t] = state.detach()
-            cache["z_posterior", t] = posterior.detach()
-            cache["z_prior", t] = prior.detach()
-            cache["h", t] = state.detach()
+            # cache common components via helper so hooks are applied uniformly
+            # 'h' is essentially the same as state in this wrapper
+            self._apply_and_cache("h", t, state, hook_ctx, cache, names_filter)
+            # posterior was already passed through hooks above; it has been
+            # cached by the central helper when appropriate.
+            self._apply_and_cache(
+                "z_prior",
+                t,
+                prior,
+                HookContext(timestep=t, component="z_prior", trajectory_so_far=states),
+                cache,
+                names_filter,
+            )
             if obs_encoding is not None:
-                cache["observation", t] = obs_encoding.detach()
+                self._apply_and_cache(
+                    "observation",
+                    t,
+                    obs_encoding,
+                    HookContext(timestep=t, component="observation", trajectory_so_far=states),
+                    cache,
+                    names_filter,
+                )
 
             reward_pred = None
             if caps.has_reward_head:
@@ -241,7 +532,14 @@ class HookedWorldModel:
                         posterior.unsqueeze(0) if posterior.dim() == 1 else posterior,
                     )
                     if reward_pred is not None:
-                        cache["reward", t] = reward_pred.squeeze(0).detach()
+                        self._apply_and_cache(
+                            "reward",
+                            t,
+                            reward_pred.squeeze(0),
+                            HookContext(timestep=t, component="reward", trajectory_so_far=states),
+                            cache,
+                            names_filter,
+                        )
                 except NotImplementedError:
                     pass
 
@@ -264,7 +562,14 @@ class HookedWorldModel:
                             action,
                         )
                     if value_pred is not None:
-                        cache["value", t] = value_pred.squeeze(0).detach()
+                        self._apply_and_cache(
+                            "value",
+                            t,
+                            value_pred.squeeze(0),
+                            HookContext(timestep=t, component="value", trajectory_so_far=states),
+                            cache,
+                            names_filter,
+                        )
                 except NotImplementedError:
                     pass
 
@@ -275,7 +580,15 @@ class HookedWorldModel:
                 p = p / p.sum(dim=-1, keepdim=True)
                 q = q / q.sum(dim=-1, keepdim=True)
                 kl = (p * (p.log() - q.log())).sum(dim=-1)
-                cache["kl", t] = kl.detach()
+                # allow hooks to observe/modify KL and centralize caching
+                self._apply_and_cache(
+                    "kl",
+                    t,
+                    kl,
+                    HookContext(timestep=t, component="kl", trajectory_so_far=states),
+                    cache,
+                    names_filter,
+                )
 
             if caps.has_decoder:
                 try:
@@ -284,7 +597,16 @@ class HookedWorldModel:
                         posterior.unsqueeze(0) if posterior.dim() == 1 else posterior,
                     )
                     if recon is not None:
-                        cache["reconstruction", t] = recon.squeeze(0).detach()
+                        self._apply_and_cache(
+                            "reconstruction",
+                            t,
+                            recon.squeeze(0),
+                            HookContext(
+                                timestep=t, component="reconstruction", trajectory_so_far=states
+                            ),
+                            cache,
+                            names_filter,
+                        )
                 except NotImplementedError:
                     pass
 
@@ -303,11 +625,35 @@ class HookedWorldModel:
             )
             state = next_state.squeeze(0)
 
+            # Apply transition hook for causality analysis
+            transition_ctx = HookContext(
+                timestep=t,
+                component="transition",
+                trajectory_so_far=states,
+                metadata={
+                    "s_t": state.clone(),  # Current state after transition
+                    "s_prev": states[-1].state if states else None,  # Previous state
+                    "a_t": action_for_transition,  # Action used
+                    "z_t": posterior,  # Latent encoding
+                },
+            )
+            state = self._hooks.apply("transition", t, state, transition_ctx)
+
             action_for_state = action.clone() if action is not None else None
+            action_source = None
+            if action_for_state is not None:
+                from world_model_lens.core.world_state import ActionSource
+
+                action_source = ActionSource(
+                    source_type="externally_provided",
+                    temperature=None,
+                )
+
             state_obj = WorldState(
                 state=state.clone(),
                 timestep=t,
                 action=action_for_state,
+                action_source=action_source,
                 reward_pred=reward_pred.squeeze(0).clone() if reward_pred is not None else None,
                 value_pred=value_pred.squeeze(0).clone() if value_pred is not None else None,
                 obs_encoding=obs_encoding.clone() if obs_encoding is not None else None,
@@ -349,15 +695,13 @@ class HookedWorldModel:
         Returns:
             WorldTrajectory, or (WorldTrajectory, ActivationCache) if return_cache
         """
-        if fwd_hooks:
-            for hook in fwd_hooks:
-                self._hooks.register(hook)
+        cache: ActivationCache | None = ActivationCache() if return_cache else None
 
-        try:
+        # Use the registry's context manager so temporary hooks are registered
+        # and cleaned up automatically, even if the forward pass raises.
+        # coerce names_filter absent -> None handled by run_with_cache
+        with self._hooks.temp_hooks(list(fwd_hooks) if fwd_hooks else []):
             traj, cache = self.run_with_cache(observations, actions)
-        finally:
-            if fwd_hooks:
-                self._hooks.clear()
 
         if return_cache:
             return traj, cache
@@ -391,8 +735,49 @@ class HookedWorldModel:
 
         for t in range(horizon):
             action = None
-            if caps.uses_actions and actions is not None and t < len(actions):
-                action = actions[t]
+            action_source = None
+
+            if caps.uses_actions:
+                if actions is not None and t < len(actions):
+                    # Externally provided action
+                    action = actions[t]
+                    from world_model_lens.core.world_state import ActionSource
+
+                    action_source = ActionSource(
+                        source_type="externally_provided",
+                        temperature=None,
+                    )
+                elif caps.has_actor:
+                    # Sample action from policy
+                    try:
+                        policy_logits = self.adapter.actor_forward(
+                            state.unsqueeze(0) if state.dim() == 1 else state,
+                            z.unsqueeze(0) if z.dim() == 1 else z,
+                        )
+                        if policy_logits is not None:
+                            # Sample action from policy
+                            if policy_logits.dim() > 2:
+                                policy_logits = policy_logits.squeeze(0)
+
+                            # Handle different action distributions
+                            if policy_logits.shape[-1] == 1:
+                                # Continuous action
+                                action = torch.tanh(policy_logits)  # Assuming tanh squashing
+                            else:
+                                # Discrete action
+                                probs = torch.softmax(policy_logits / temperature, dim=-1)
+                                action_idx = torch.multinomial(probs, 1).item()
+                                action = torch.tensor([action_idx], dtype=torch.long)
+
+                            from world_model_lens.core.world_state import ActionSource
+
+                            action_source = ActionSource(
+                                source_type="policy_sampled",
+                                policy_logits=policy_logits.detach(),
+                                temperature=temperature,
+                            )
+                    except NotImplementedError:
+                        pass
 
             prior = self.adapter.dynamics(
                 state.unsqueeze(0) if state.dim() == 1 else state,
@@ -402,7 +787,24 @@ class HookedWorldModel:
             else:
                 z = prior.squeeze(0) if prior.dim() == 1 else prior
 
+            prev_state = state.clone()
             state = self._call_transition(state, z, action)
+
+            # Apply transition hook for causality analysis
+            transition_ctx = HookContext(
+                timestep=t + start_state.timestep + 1,
+                component="transition",
+                trajectory_so_far=states,
+                metadata={
+                    "s_t": state.clone(),  # Current state after transition
+                    "s_prev": prev_state,  # Previous state
+                    "a_t": action,  # Action used
+                    "z_t": z,  # Latent encoding
+                },
+            )
+            state = self._hooks.apply(
+                "transition", t + start_state.timestep + 1, state, transition_ctx
+            )
 
             reward_pred = None
             if caps.has_reward_head and t > 0:
@@ -416,6 +818,7 @@ class HookedWorldModel:
                 state=state.clone(),
                 timestep=t + start_state.timestep + 1,
                 action=action.clone() if action is not None else None,
+                action_source=action_source,
                 reward_pred=reward_pred,
             )
             states.append(state_obj)
@@ -432,7 +835,9 @@ class HookedWorldModel:
 
     def remove_hook(self, hook: HookPoint) -> None:
         """Remove a specific hook."""
-        self._hooks.clear()
+        # Delegate to the registry's remove method so only the provided
+        # HookPoint is removed (no-op if it isn't registered).
+        self._hooks.remove(hook)
 
     def clear_hooks(self) -> None:
         """Remove all hooks."""

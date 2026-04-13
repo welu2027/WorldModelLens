@@ -7,12 +7,17 @@ This example demonstrates the basic workflow:
 4. Train a linear probe on cached activations
 """
 
-import numpy as np
+import pathlib
+
 import torch
-from world_model_lens.visualizations import CacheSignalPlotter
+import matplotlib.pyplot as plt
+
+OUTPUT_DIR = pathlib.Path("assets/examples")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 from world_model_lens import HookedWorldModel, WorldModelConfig
 from world_model_lens.backends.dreamerv3 import DreamerV3Adapter
+from world_model_lens.visualization import plot_quickstart_dashboard
 
 
 def main():
@@ -51,13 +56,21 @@ def main():
     print(f"    h_t shape: {h_t.shape}")
     print(f"    z_posterior shape: {z_posterior.shape}")
 
-    print("Using the viz lib to plot stuff")
-
-    cache_plotter: CacheSignalPlotter = CacheSignalPlotter(cache)
-    cache_plotter.plot_reward_timeline()
-
     imagined = wm.imagine(start_state=traj.states[5], horizon=20)
     print(f"\n[7] Imagination complete: {imagined.length} steps")
+
+    print("\n[8] Building visualization dashboard...")
+    plot_quickstart_dashboard(
+        traj=traj,
+        cache=cache,
+        imagined_traj=imagined,
+        n_cat=cfg.n_cat,
+        n_cls=cfg.n_cls,
+        wm=wm,
+        output_path=OUTPUT_DIR / "quickstart_dashboard.png",
+    )
+    print("    Saved quickstart_dashboard.png")
+    plt.show()
 
     print("\n" + "=" * 60)
     print("Quickstart complete!")

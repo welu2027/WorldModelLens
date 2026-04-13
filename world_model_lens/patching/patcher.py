@@ -299,8 +299,9 @@ class TemporalPatcher:
         corrupted_cache = ActivationCache()
         for key in clean_cache.component_names:
             for t in clean_cache.timesteps:
-                if key in clean_cache._store:
-                    original = self._ensure_device(clean_cache[key, t])
+                original = clean_cache.get(key, t, None)
+                if original is not None:
+                    original = self._ensure_device(original)
                     corrupted = corruption_fn(original)
                     corrupted_cache[key, t] = corrupted
 
@@ -450,8 +451,9 @@ class CorruptedCacheFactory:
 
         for key in target_components:
             for t in cache.timesteps:
-                if key in cache._store:
-                    original = cache[key, t].to(device)
+                original = cache.get(key, t, None)
+                if original is not None:
+                    original = original.to(device)
                     noise = torch.randn_like(original) * noise_level
                     corrupted[key, t] = original + noise
 
@@ -478,8 +480,9 @@ class CorruptedCacheFactory:
 
         for key in target_components:
             for t in cache.timesteps:
-                if key in cache._store:
-                    original = cache[key, t].to(device)
+                original = cache.get(key, t, None)
+                if original is not None:
+                    original = original.to(device)
                     corrupted[key, t] = torch.zeros_like(original)
 
         return corrupted
@@ -506,8 +509,9 @@ class CorruptedCacheFactory:
         for key in target_components:
             all_tensors = []
             for t in cache.timesteps:
-                if key in cache._store:
-                    all_tensors.append(cache[key, t].to(device))
+                val = cache.get(key, t, None)
+                if val is not None:
+                    all_tensors.append(val.to(device))
 
             if all_tensors:
                 shuffled = torch.cat(all_tensors)[torch.randperm(len(all_tensors))]

@@ -130,12 +130,17 @@ A sequence of `WorldState` objects — the fundamental unit for replay, analysis
 
 ### 4. `ActivationCache` → [activation_cache.py](file:///d:/WorldModelLens/core/activation_cache.py)
 
-Dictionary-like storage indexed by `(component_name, timestep)`. Stores every intermediate activation during a forward pass:
+Dictionary-like storage indexed by `(component_name, timestep)`. Stores every intermediate activation during a forward pass. **New**: Supports storing full `torch.distributions.Distribution` objects for uncertainty analysis.
 
 ```python
 cache["h", 5]          # hidden state at t=5
 cache["z_posterior", 5] # latent posterior at t=5
 cache["kl", 5]         # KL divergence at t=5
+
+# New: Store distributions for variance analysis
+import torch.distributions as dist
+cache["z_posterior", 5] = dist.Normal(mean, std)
+params = cache.get_distribution_params("z_posterior", 5)  # {"mean": ..., "std": ..., "variance": ...}
 ```
 
 ### 5. `HookPoint` / `HookRegistry` → [hooks.py](file:///d:/WorldModelLens/core/hooks.py)

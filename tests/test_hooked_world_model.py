@@ -222,3 +222,211 @@ def test_run_with_cache_falls_back_to_predict_value_for_legacy_adapter():
 
     assert len(adapter.value_calls) == 3
     assert "value" in cache.component_names
+
+
+def test_run_with_cache_tracks_action_sources(hooked_wm, fake_obs_seq, fake_action_seq):
+    """Test that run_with_cache properly tracks action sources."""
+    traj, _ = hooked_wm.run_with_cache(fake_obs_seq, fake_action_seq)
+
+    for state in traj.states:
+        if state.has_action():
+            assert state.action_source is not None
+            assert state.action_source.source_type == "externally_provided"
+            assert state.action_source.temperature is None
+
+
+def test_imagine_samples_actions_from_policy():
+    """Test that imagine samples actions from policy when not provided."""
+    cfg = WorldModelConfig(
+        d_h=8,
+        d_obs=4,
+        d_action=2,
+        has_decoder=False,
+        has_reward_head=False,
+        has_value_head=False,
+        has_policy_head=True,
+        has_done_head=False,
+    )
+
+    class PolicyAdapter(WorldModelAdapter):
+        def __init__(self, config):
+            super().__init__(config)
+            self._capabilities = WorldModelCapabilities(
+                has_actor=True,
+                uses_actions=True,
+                is_rl_trained=True,
+            )
+            self.dynamics_layer = nn.Linear(config.d_h, config.d_h)
+            self.actor_layer = nn.Linear(config.d_h, config.d_action)
+
+        def encode(self, obs, h_prev):
+            return torch.randn(1, self.config.d_h), None
+
+        def transition(self, h, z, action=None):
+            return self.dynamics_layer(h)
+
+        def dynamics(self, h):
+            return torch.randn(1, self.config.d_h)
+
+        def sample_z(self, prior, temperature=1.0):
+            return prior.squeeze(0)
+
+        def initial_state(self, batch_size=1, device=None):
+            return torch.zeros(batch_size, self.config.d_h)
+
+        def actor_forward(self, h, z):
+            return self.actor_layer(h)
+
+    adapter = PolicyAdapter(cfg)
+    wm = HookedWorldModel(adapter=adapter, config=cfg)
+
+    # Create a start state
+    start_state = adapter.initial_state()
+    from world_model_lens import WorldState
+
+    start_ws = WorldState(state=start_state, timestep=0)
+
+    # Imagine without providing actions - should sample from policy
+    imagined = wm.imagine(start_state=start_ws, horizon=5)
+
+    # Check that actions were sampled
+    for i, state in enumerate(imagined.states):
+        if i > 0:  # Skip the first state which is the start state
+            assert state.has_action()
+            assert state.action_source is not None
+            assert state.action_source.source_type == "policy_sampled"
+            assert state.action_source.policy_logits is not None
+            assert state.action_source.temperature == 1.0
+
+
+def test_imagine_uses_provided_actions():
+    """Test that imagine uses provided actions when given."""
+    cfg = WorldModelConfig(
+        d_h=8,
+        d_obs=4,
+        d_action=2,
+        has_decoder=False,
+        has_reward_head=False,
+        has_value_head=False,
+        has_policy_head=True,
+        has_done_head=False,
+    )
+
+    class SimpleAdapter(WorldModelAdapter):
+        def __init__(self, config):
+            super().__init__(config)
+            self._capabilities = WorldModelCapabilities(
+                uses_actions=True,
+                is_rl_trained=True,
+            )
+            self.dynamics_layer = nn.Linear(config.d_h, config.d_h)
+
+        def encode(self, obs, h_prev):
+            return torch.randn(1, self.config.d_h), None
+
+        def transition(self, h, z, action=None):
+            return self.dynamics_layer(h)
+
+        def dynamics(self, h):
+            return torch.randn(1, self.config.d_h)
+
+        def sample_z(self, prior, temperature=1.0):
+            return prior.squeeze(0)
+
+        def initial_state(self, batch_size=1, device=None):
+            return torch.zeros(batch_size, self.config.d_h)
+
+    adapter = SimpleAdapter(cfg)
+    wm = HookedWorldModel(adapter=adapter, config=cfg)
+
+    # Create a start state
+    start_state = adapter.initial_state()
+    from world_model_lens import WorldState
+
+    start_ws = WorldState(state=start_state, timestep=0)
+
+    # Provide actions explicitly
+    actions = torch.randn(3, cfg.d_action)
+    imagined = wm.imagine(start_state=start_ws, actions=actions, horizon=3)
+
+    # Check that provided actions were used
+    for i, state in enumerate(imagined.states):
+        assert state.has_action()
+        assert state.action_source is not None
+        assert state.action_source.source_type == "externally_provided"
+        # Should match the provided action
+        assert torch.allclose(state.action, actions[i])
+
+
+def test_transition_hook_applies():
+    """Test that transition hooks are properly applied."""
+    cfg = WorldModelConfig(
+        d_h=8,
+        d_obs=4,
+        d_action=2,
+        has_decoder=False,
+        has_reward_head=False,
+        has_value_head=False,
+        has_policy_head=False,
+        has_done_head=False,
+    )
+
+    class SimpleAdapter(WorldModelAdapter):
+        def __init__(self, config):
+            super().__init__(config)
+            self._capabilities = WorldModelCapabilities(
+                uses_actions=True,  # Enable actions
+            )
+            self.dynamics_layer = nn.Linear(config.d_h, config.d_h)
+
+        def encode(self, obs, h_prev):
+            return torch.randn(1, self.config.d_h), None
+
+        def transition(self, h, z, action=None):
+            return self.dynamics_layer(h)
+
+        def dynamics(self, h):
+            return torch.randn(1, self.config.d_h)
+
+        def sample_z(self, prior, temperature=1.0):
+            return prior.squeeze(0)
+
+        def initial_state(self, batch_size=1, device=None):
+            return torch.zeros(batch_size, self.config.d_h)
+
+    adapter = SimpleAdapter(cfg)
+    wm = HookedWorldModel(adapter=adapter, config=cfg)
+
+    # Add a transition hook
+    hook_calls = []
+
+    def transition_hook(tensor, ctx):
+        hook_calls.append(
+            {
+                "timestep": ctx.timestep,
+                "component": ctx.component,
+                "s_prev": ctx.metadata.get("s_prev"),
+                "a_t": ctx.metadata.get("a_t"),
+                "s_t": ctx.metadata.get("s_t"),
+                "z_t": ctx.metadata.get("z_t"),
+            }
+        )
+        return tensor
+
+    from world_model_lens import HookPoint
+
+    hook = HookPoint(name="transition", fn=transition_hook)
+    wm.add_hook(hook)
+
+    observations = torch.randn(2, cfg.d_obs)
+    actions = torch.randn(2, cfg.d_action)
+    traj, _ = wm.run_with_cache(observations, actions)
+
+    # Should have called the hook for each timestep
+    assert len(hook_calls) == 2
+    for i, call in enumerate(hook_calls):
+        assert call["component"] == "transition"
+        assert call["timestep"] == i
+        assert call["s_t"] is not None
+        assert call["a_t"] is not None
+        assert call["z_t"] is not None

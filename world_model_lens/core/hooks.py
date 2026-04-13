@@ -65,7 +65,7 @@ class HookRegistry:
         self._hooks: dict[tuple[str, int | None], list[HookPoint]] = {}
         self._global_hooks: dict[str, list[HookPoint]] = {}
 
-    def register(self, hook: HookPoint) -> None:
+    def register(self, hook: HookPoint, prepend: bool = False) -> None:
         """Register a hook.
 
         Args:
@@ -73,17 +73,56 @@ class HookRegistry:
         """
         if hook.timestep is not None:
             key = (hook.name, hook.timestep)
+            lst = self._hooks.setdefault(key, [])
         else:
             key = (hook.name, None)
-            self._global_hooks.setdefault(hook.name, []).append(hook)
+            lst = self._global_hooks.setdefault(hook.name, [])
+
+        if prepend:
+            lst.insert(0, hook)
+        else:
+            lst.append(hook)
+
+    def remove(self, hook: HookPoint) -> None:
+        """Remove a specific HookPoint from the registry if present.
+
+        This is a safe no-op when the hook is not found.
+        """
+        # remove from global hooks
+        if hook.timestep is None:
+            lst = self._global_hooks.get(hook.name, [])
+            try:
+                lst.remove(hook)
+            except ValueError:
+                pass
             return
 
-        self._hooks.setdefault(key, []).append(hook)
+        # remove from timestep-specific hooks
+        key = (hook.name, hook.timestep)
+        lst = self._hooks.get(key, [])
+        try:
+            lst.remove(hook)
+        except ValueError:
+            pass
 
-    def clear(self) -> None:
-        """Remove all registered hooks."""
-        self._hooks.clear()
-        self._global_hooks.clear()
+    def clear(self, name: str | None = None) -> None:
+        """Remove registered hooks.
+
+        If *name* is None (default) clears all hooks.  If *name* is provided
+        removes all hooks for that component name.
+        """
+        if name is None:
+            self._hooks.clear()
+            self._global_hooks.clear()
+            return
+
+        # remove global hooks for this name
+        self._global_hooks.pop(name, None)
+
+        # remove any timestep-specific keys matching the name
+        keys_to_remove = [k for k in self._hooks.keys() if k[0] == name]
+        for k in keys_to_remove:
+            self._hooks.pop(k, None)
 
     def get_hooks_for(self, component: str, timestep: int | None = None) -> list[HookPoint]:
         """Get all hooks matching a component and timestep.
@@ -143,3 +182,30 @@ class HookRegistry:
         return sum(len(h) for h in self._hooks.values()) + sum(
             len(h) for h in self._global_hooks.values()
         )
+
+    def temp_hooks(self, hooks: list[HookPoint]):
+        """Context manager that registers hooks for the duration of a `with` block.
+
+        Hooks are prepended so they run before existing permanent hooks. On
+        exit the exact HookPoint objects are removed (best-effort).
+        """
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _cm():
+            # register (prepend) all hooks and remember which were actually added
+            added: list[HookPoint] = []
+            for h in hooks:
+                self.register(h, prepend=True)
+                added.append(h)
+            try:
+                yield
+            finally:
+                # best-effort removal — don't let cleanup mask original errors
+                for h in added:
+                    try:
+                        self.remove(h)
+                    except Exception:
+                        pass
+
+        return _cm()

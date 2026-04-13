@@ -5,7 +5,11 @@ baseline rollout, latent ablation, trajectory comparison, divergence tracing,
 branch tree, and side-by-side intervention metrics.
 """
 
+import pathlib
+
 import torch
+import numpy as np
+import matplotlib.pyplot as plt
 
 from world_model_lens import HookedWorldModel, WorldModelConfig
 from world_model_lens.backends.dreamerv3 import DreamerV3Adapter
@@ -14,6 +18,10 @@ from world_model_lens.causal import (
     Intervention,
     rollout_comparison,
 )
+from world_model_lens.visualization import plot_causal_engine_dashboard
+
+OUTPUT_DIR = pathlib.Path("assets/examples")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def main():
@@ -58,7 +66,7 @@ def main():
 
     # --- Cumulative divergence over time
     div_curve = engine.trace_divergence(baseline_traj, cf_traj)
-    sample_ts = [0, T // 2, T - 1]
+    sample_ts = [0, T // 2, T - 1]  # 0, 7, 14
     print("\ntrace_divergence (cumulative MSE-style drift) at sample timesteps:")
     for t in sample_ts:
         if t in div_curve:
@@ -119,6 +127,19 @@ def main():
         ):
             if key in row:
                 print(f"    {key}: {row[key]}")
+
+    # --- Build visualization dashboard ---
+    print("\nBuilding visualization dashboard...")
+    plot_causal_engine_dashboard(
+        wm=wm,
+        div_curve=div_curve,
+        tree=tree,
+        cache=cache,
+        intervention_t=5,
+        output_path=OUTPUT_DIR / "causal_engine_dashboard.png",
+    )
+    print("    Saved causal_engine_dashboard.png")
+    plt.show()
 
     print("\nDone.")
 

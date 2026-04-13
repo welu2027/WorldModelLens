@@ -141,7 +141,7 @@ class VideoWorldModelAdapter(BaseModelAdapter):
         observation: torch.Tensor,
         state: Optional[torch.Tensor] = None,
         action: Optional[torch.Tensor] = None,
-    ) -> Dict[str, torch.Tensor]:
+    ) -> WorldModelOutput:
         """Full video prediction forward pass."""
         h_prev = state if state is not None else self.initial_state(batch_size=1, device=observation.device)[0]
         posterior, obs_encoding = self.encode(observation, h_prev)

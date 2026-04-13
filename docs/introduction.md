@@ -113,7 +113,7 @@ effect = estimator.estimate(intervention, trajectory)
 **`WorldTrajectory`** — a sequence of `WorldState` objects representing a full episode or rollout.
 
 **`ActivationCache`** — a dict-like store keyed by `(component_name, timestep)` holding every
-cached tensor from a forward pass.
+cached tensor from a forward pass. Supports storing full distributions for uncertainty analysis.
 
 **`HookPoint`** — a named location in the forward pass where a function can intercept and modify
 the activation passing through it.

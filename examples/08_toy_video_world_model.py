@@ -22,7 +22,11 @@ from world_model_lens import HookedWorldModel
 from world_model_lens.analysis.belief_analyzer import BeliefAnalyzer
 from world_model_lens.probing.geometry import GeometryAnalyzer
 from world_model_lens.probing.temporal_memory import TemporalMemoryProber
+from world_model_lens.visualization import plot_toy_video_dashboard
+import pathlib
 
+OUTPUT_DIR = pathlib.Path("assets/examples")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 def create_video_model():
     """Create a toy video world model."""
@@ -150,6 +154,19 @@ def main():
     print("  - Surprise timeline works")
     print("  - RL-specific analysis gracefully skipped")
     print()
+
+    print("\n[9] Generating visualization dashboard...")
+    plot_toy_video_dashboard(
+        traj=traj,
+        cache=cache,
+        mem_result=mem_result,
+        # surprise_result=surprise_result,
+        # traj_metrics=traj_metrics,
+        # manifold_result=manifold_result,
+        # dep_result=dep_result,
+        output_path=OUTPUT_DIR / "toy_video_dashboard.png",
+    )
+    print("    Saved toy_video_dashboard.png")
 
 
 if __name__ == "__main__":

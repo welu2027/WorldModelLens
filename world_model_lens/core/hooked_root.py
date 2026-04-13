@@ -15,32 +15,35 @@ import torch
 import torch.nn as nn
 from collections import OrderedDict
 
+# Adapter imports for the timestep-oriented hook API
+from world_model_lens.core import hooks as core_hooks
+
 
 @dataclass
-class HookPoint:
+class ModuleHookPoint:
     """A named hook function registered at a specific component.
 
-    Similar to TransformerLens's hook system.
-
-    Attributes:
-        name: Component name in standardized namespace
-        fn: The hook function(tensor, hook_context) -> tensor
-        is_permanent: If True, hook persists across runs
-        is_conditional: If True, hook only fires on conditions
+    This module-level hook type is intentionally separate from the
+    timestep-oriented HookPoint defined in `world_model_lens.core.hooks`.
+    Keeping distinct types clarifies the different hook semantics used by
+    HookedRootModule (module instrumentation) vs. timestep hooks (sequence
+    interventions).
     """
 
     name: str
-    fn: Callable[[torch.Tensor, "HookContext"], torch.Tensor]
+    fn: Callable[[torch.Tensor, "ModuleHookContext"], torch.Tensor]
     is_permanent: bool = False
     is_conditional: bool = False
-    condition_fn: Optional[Callable[["HookContext"], bool]] = None
+    condition_fn: Optional[Callable[["ModuleHookContext"], bool]] = None
 
 
 @dataclass
-class HookContext:
-    """Runtime metadata passed to hook functions.
+class ModuleHookContext:
+    """Runtime metadata passed to module-level hook functions.
 
-    Provides full context about where in the model the hook fired.
+    Fields describe where in the module hierarchy the hook fired. This is
+    different from the timestep-oriented `HookContext` in
+    `world_model_lens.core.hooks` which focuses on sequence/timestep info.
     """
 
     component_type: str  # e.g., 'encoder', 'dynamics', 'reward_head'
@@ -74,17 +77,24 @@ class HookedRootModule(nn.Module):
         z_hook = cache["dynamics.prior.hook_sample"]
     """
 
-    # Class-level hook registry
-    _forward_hooks: Dict[str, List[HookPoint]] = field(default_factory=dict)
-    _hook_metadata: Dict[str, HookContext] = field(default_factory=dict)
-    _residual_streams: Dict[str, torch.Tensor] = field(default_factory=dict)
-    _name_to_module: Dict[str, nn.Module] = field(default_factory=dict)
-    _module_to_name: Dict[int, str] = field(default_factory=dict)
+    # Per-instance registries and metadata. These are created in __init__ to
+    # avoid accidental sharing between instances (dataclasses.field was
+    # incorrectly used here previously and returns a dataclass.Field object).
 
     def __init__(self):
         super().__init__()
         self._hooks_installed = False
         self._hook_handles: List[Any] = []
+        # Initialize per-instance storage for hooks and metadata.
+        # Use a WML-specific name to avoid shadowing nn.Module internals.
+        self._wml_forward_hooks: Dict[str, List[ModuleHookPoint]] = {}
+        self._hook_metadata: Dict[str, ModuleHookContext] = {}
+        self._residual_streams: Dict[str, torch.Tensor] = {}
+        self._name_to_module: Dict[str, nn.Module] = {}
+        self._module_to_name: Dict[int, str] = {}
+        # Map core HookPoint instances to ModuleHookPoint wrappers so we can
+        # remove temporary hooks registered via the core API.
+        self._core_to_module_map: Dict[int, ModuleHookPoint] = {}
 
     # ==================== HOOK NAMESPACE ====================
     # Standardized naming convention (TransformerLens-style)
@@ -136,7 +146,7 @@ class HookedRootModule(nn.Module):
         self._name_to_module.clear()
         self._module_to_name.clear()
         self._hook_metadata.clear()
-        self._forward_hooks.clear()
+        self._wml_forward_hooks.clear()
 
         self._recursive_register(self, name_prefix="")
         self._hooks_installed = True
@@ -159,7 +169,7 @@ class HookedRootModule(nn.Module):
             component_type = self._categorize_component(name)
 
             # Create hook context for this module
-            self._hook_metadata[full_name] = HookContext(
+            self._hook_metadata[full_name] = ModuleHookContext(
                 component_type=component_type,
                 component_name=full_name,
                 layer_index=self._get_layer_index(name),
@@ -223,16 +233,17 @@ class HookedRootModule(nn.Module):
             def hook(mod, input, output):
                 ctx = self._hook_metadata.get(
                     name,
-                    HookContext(
+                    ModuleHookContext(
                         component_type=component_type,
                         component_name=name,
+                        layer_index=None,
                         timestep=0,
                         forward_stack=[name],
                     ),
                 )
 
                 # Run registered hooks
-                for hp in self._forward_hooks.get(hook_name, []):
+                for hp in self._wml_forward_hooks.get(hook_name, []):
                     if hp.is_conditional and hp.condition_fn:
                         if not hp.condition_fn(ctx):
                             continue
@@ -261,7 +272,7 @@ class HookedRootModule(nn.Module):
     def add_hook(
         self,
         name: str,
-        fn: Callable[[torch.Tensor, HookContext], torch.Tensor],
+        fn: Callable[[torch.Tensor, ModuleHookContext], torch.Tensor],
         is_permanent: bool = False,
     ) -> None:
         """Add a hook to a specific component.
@@ -271,11 +282,52 @@ class HookedRootModule(nn.Module):
             fn: Hook function
             is_permanent: Keep hook across runs
         """
-        hook = HookPoint(name=name, fn=fn, is_permanent=is_permanent)
+        hook = ModuleHookPoint(name=name, fn=fn, is_permanent=is_permanent)
 
-        if name not in self._forward_hooks:
-            self._forward_hooks[name] = []
-        self._forward_hooks[name].append(hook)
+        if name not in self._wml_forward_hooks:
+            self._wml_forward_hooks[name] = []
+        self._wml_forward_hooks[name].append(hook)
+
+    # --- Compatibility shims for the timestep-oriented Hook API ---
+    def add_core_hook(self, hook: core_hooks.HookPoint, prepend: bool = False) -> None:
+        """Adapter: register a core timestep HookPoint as a module-level hook.
+
+        This wraps the core HookPoint into a ModuleHookPoint and stores a
+        mapping so it can be removed later via remove_core_hook.
+        """
+
+        # Wrap core hook function to adapt signature
+        def wrapper(tensor, ctx: ModuleHookContext):
+            # Convert ModuleHookContext -> core HookContext
+            core_ctx = core_hooks.HookContext(
+                timestep=ctx.timestep,
+                component=ctx.component_name,
+                trajectory_so_far=[],
+                metadata={},
+            )
+            return hook.fn(tensor, core_ctx)
+
+        mhook = ModuleHookPoint(name=hook.name, fn=wrapper, is_permanent=False)
+        if hook.name not in self._wml_forward_hooks:
+            self._wml_forward_hooks[hook.name] = []
+        if prepend:
+            self._wml_forward_hooks[hook.name].insert(0, mhook)
+        else:
+            self._wml_forward_hooks[hook.name].append(mhook)
+
+        # remember mapping for removal
+        self._core_to_module_map[id(hook)] = mhook
+
+    def remove_core_hook(self, hook: core_hooks.HookPoint) -> None:
+        """Remove a core HookPoint previously added via add_core_hook."""
+        mhook = self._core_to_module_map.pop(id(hook), None)
+        if mhook is None:
+            return
+        lst = self._wml_forward_hooks.get(mhook.name, [])
+        try:
+            lst.remove(mhook)
+        except ValueError:
+            pass
 
     def add_hooks(
         self,
@@ -293,17 +345,18 @@ class HookedRootModule(nn.Module):
 
     def remove_hook(self, name: str) -> None:
         """Remove hooks from a component."""
-        self._forward_hooks.pop(name, None)
+        # Maintain legacy API name but operate on the WML-specific registry.
+        self._wml_forward_hooks.pop(name, None)
 
     def clear_hooks(self, permanent_only: bool = False) -> None:
         """Clear all hooks."""
         if permanent_only:
-            self._forward_hooks = {
-                k: [h for h in v if h.is_permanent] for k, v in self._forward_hooks.items()
+            self._wml_forward_hooks = {
+                k: [h for h in v if h.is_permanent] for k, v in self._wml_forward_hooks.items()
             }
-            self._forward_hooks = {k: v for k, v in self._forward_hooks.items() if v}
+            self._wml_forward_hooks = {k: v for k, v in self._wml_forward_hooks.items() if v}
         else:
-            self._forward_hooks.clear()
+            self._wml_forward_hooks.clear()
 
         for handle in self._hook_handles:
             handle.remove()
@@ -380,7 +433,7 @@ class HookedRootModule(nn.Module):
         """Get module by standardized name."""
         return self._name_to_module.get(name)
 
-    def get_hook_context(self, name: str) -> Optional[HookContext]:
+    def get_hook_context(self, name: str) -> Optional[ModuleHookContext]:
         """Get metadata for a hook point."""
         return self._hook_metadata.get(name)
 
