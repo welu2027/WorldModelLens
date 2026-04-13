@@ -6,11 +6,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
-
-try:
-    from tqdm import tqdm
-except ImportError:
-    tqdm = None
+from tqdm import tqdm
 
 
 def _get_device() -> torch.device:
@@ -194,6 +190,9 @@ class SAETrainer:
         l1_coefficient: float = 1e-3,
         device: Optional[torch.device] = None,
         tied_weights: bool = True,
+        sae_class: Optional[Callable] = None,
+        sae_kwargs: Optional[Dict[str, Any]] = None,
+        sae_type: Optional[str] = None,
     ):
         """Initialize trainer.
 
@@ -212,8 +211,97 @@ class SAETrainer:
             l1_coefficient=l1_coefficient,
             tied_weights=tied_weights,
         )
-        self.sae = SparseAutoencoder(config, device)
+        # keep config on trainer so we don't rely on model having .config
+        self.config = config
+        # allow injecting alternate SAE implementations via sae_class
         self.device = device or _get_device()
+        sae_kwargs = sae_kwargs or {}
+
+        # allow selecting common SAE implementations by name for simplicity
+        if sae_type is not None and sae_class is None:
+            # keep imports local to avoid circular import at module load
+            try:
+                from world_model_lens.sae.sae import (
+                    GatedSparseAutoencoder,
+                    TopKSparseAutoencoder,
+                )
+            except Exception:
+                GatedSparseAutoencoder = None
+                TopKSparseAutoencoder = None
+
+            name = sae_type.lower()
+            if name in ("trainer", "sparse", "default"):
+                sae_class = None
+            elif name in ("gated",):
+                sae_class = GatedSparseAutoencoder
+            elif name in ("topk", "compact", "compact_topk"):
+                sae_class = TopKSparseAutoencoder
+            else:
+                # leave sae_class as provided (possibly None)
+                sae_class = sae_class
+
+        if sae_class is None:
+            # default trainer-local SparseAutoencoder
+            self.sae = SparseAutoencoder(config, self.device)
+        else:
+            # Prefer standardized constructor if available: from_config(config, device)
+            constructed = False
+            if hasattr(sae_class, "from_config"):
+                try:
+                    self.sae = sae_class.from_config(config, self.device)
+                    constructed = True
+                except Exception:
+                    constructed = False
+
+            if not constructed:
+                # Try common explicit (config, device) constructor next
+                try:
+                    self.sae = sae_class(config, self.device)
+                    constructed = True
+                except Exception:
+                    constructed = False
+
+            if not constructed:
+                # Try keyword-style constructor that many compact SAEs support
+                try:
+                    self.sae = sae_class(
+                        input_dim=d_input,
+                        n_features=n_boj,
+                        k=k,
+                        tie_weights=tied_weights,
+                        **sae_kwargs,
+                    )
+                    constructed = True
+                except Exception:
+                    constructed = False
+
+            if not constructed:
+                # try simple positional constructors: (d_input, n_boj, k)
+                try:
+                    self.sae = sae_class(d_input, n_boj, k)
+                    constructed = True
+                except Exception:
+                    constructed = False
+
+            if not constructed:
+                # try simplest positional (d_input, n_boj)
+                try:
+                    self.sae = sae_class(d_input, n_boj)
+                    constructed = True
+                except Exception as e:
+                    # give up and raise a helpful error
+                    raise TypeError(
+                        f"Unable to construct SAE from {sae_class}."
+                        " Expected one of: class.from_config(config, device),"
+                        " (config, device), (input_dim=.., n_features=.., k=..),"
+                        " or positional (d_input, n_boj[, k])."
+                    ) from e
+
+        # ensure model lives on trainer device
+        self.sae = self.sae.to(self.device)
+        # store class/kwargs for introspection
+        self.sae_class = sae_class
+        self.sae_kwargs = sae_kwargs
 
     def train(
         self,
@@ -269,17 +357,40 @@ class SAETrainer:
 
                 optimizer.zero_grad()
 
-                recon, sparse_h, mask = self.sae(batch)
+                out = self.sae(batch)
+
+                # support SAEs that return (recon, sparse_h, mask) or (recon, sparse_h)
+                if isinstance(out, (tuple, list)):
+                    if len(out) == 3:
+                        recon, sparse_h, mask = out
+                    elif len(out) == 2:
+                        recon, sparse_h = out
+                        mask = None
+                    else:
+                        raise RuntimeError("Unexpected SAE forward output shape")
+                else:
+                    # single tensor returned (assume reconstruction) - not supported
+                    raise RuntimeError(
+                        "SAE forward must return (recon, sparse_h) or (recon, sparse_h, mask)"
+                    )
 
                 recon_loss = F.mse_loss(recon, batch)
-                l1_loss = self.sae.config.l1_coefficient * sparse_h.abs().sum()
+                # normalize sparsity penalty by taking mean over batch+features
+                l1_loss = self.config.l1_coefficient * sparse_h.abs().mean()
                 loss = recon_loss + l1_loss
 
                 loss.backward()
                 optimizer.step()
 
                 epoch_loss += loss.item()
-                epoch_l0 += self.sae.compute_l0(sparse_h).item()
+                # compute l0 using available API or approximate
+                if hasattr(self.sae, "compute_l0"):
+                    try:
+                        epoch_l0 += self.sae.compute_l0(sparse_h).item()
+                    except Exception:
+                        epoch_l0 += (sparse_h.abs() > 1e-8).float().sum(dim=-1).mean().item()
+                else:
+                    epoch_l0 += (sparse_h.abs() > 1e-8).float().sum(dim=-1).mean().item()
                 epoch_recon += recon_loss.item()
                 epoch_l1 += l1_loss.item()
 
