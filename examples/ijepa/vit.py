@@ -88,6 +88,10 @@ class VisionTransformer(nn.Module):
     def forward(self, x, mask=None):
         x = self.patch_embed(x)
         x = x + self.pos_embed
+        return self.forward_blocks(x, mask)
+
+    def forward_blocks(self, x, mask=None):
+        """Processes latent embeddings through the transformer blocks."""
         x = self.pos_drop(x)
 
         for block in self.blocks:

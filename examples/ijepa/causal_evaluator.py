@@ -46,20 +46,23 @@ class IJEPAFaithfulnessEvaluator:
         # We start with the actual patch embeddings
         x = self.patch_embeddings.clone()
         
-        # Apply ablation to specific IDs
+        # Apply ablation to specific IDs before adding positional embeddings and encoding
         baseline_emb = self.mean_patch_emb if baseline == "mean" else self.zero_patch_emb
         for pid in ablated_ids:
             x[:, pid, :] = baseline_emb
             
-        # 2. Extract context subset [B, N_context, C]
-        # In I-JEPA, we only pass visible context IDs to the predictor
-        # For ablation, we pass the visible but potentially "masked" patches
-        context_ids = sorted(list(active_context_ids) + list(ablated_ids))
-        context_latents = x[:, context_ids, :]
+        # 2. Add encoder's positional info and extract context subset
+        x = x + self.model.context_encoder.pos_embed
         
-        # 3. Predict
+        context_ids = sorted(list(active_context_ids) + list(ablated_ids))
+        context_latents_shallow = x[:, context_ids, :]
+        
+        # 3. Process through context encoder blocks (THE DEEP STEP)
         with torch.no_grad():
-            # Add pos embed inside predictor.forward
+            context_latents = self.model.context_encoder.forward_blocks(context_latents_shallow)
+            
+            # 4. Predict
+            # Add predictor's pos embed inside predictor.forward
             pred = self.model.predictor(context_latents, context_ids, [target_id])
             target_gt = self.full_latents[:, [target_id], :]
             
@@ -67,9 +70,14 @@ class IJEPAFaithfulnessEvaluator:
 
     def evaluate_faithfulness(self, target_id: int, context_ids: List[int], n_steps=20, n_random=5):
         """Runs ablation and reconstruction tests for a target."""
-        # Get attributions from target's perspective (if using predictor attn)
+        # Get attributions from target's perspective (using predictor attn on DEEP latents)
         with torch.no_grad():
-            _ = self.model.predictor(self.patch_embeddings[:, context_ids, :], context_ids, [target_id])
+            # Get deep context latents for attribution extraction
+            x_shallow = self.patch_embeddings + self.model.context_encoder.pos_embed
+            ctx_latents_shallow = x_shallow[:, context_ids, :]
+            ctx_latents = self.model.context_encoder.forward_blocks(ctx_latents_shallow)
+            
+            _ = self.model.predictor(ctx_latents, context_ids, [target_id])
             attn = self.model.predictor.get_last_self_attention()[0].mean(0)
             # Index of target in the combined [context + target] seq is the last one
             target_to_context_attn = attn[-1, :len(context_ids)].cpu().numpy()

@@ -6,7 +6,7 @@ from image_utils import get_sample_image, preprocess_image, get_ijepa_masks
 import time
 import os
 
-def train_ijepa_mini(epochs=50, steps_per_epoch=4, lr=1e-4):
+def train_ijepa_mini(epochs=100, steps_per_epoch=4, lr=1e-4):
     print("Starting I-JEPA Mini-Training...")
     model = IJEPAModel()
     model.train()

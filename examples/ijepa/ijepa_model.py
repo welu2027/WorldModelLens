@@ -80,11 +80,13 @@ class IJEPAModel(nn.Module):
             target_gt = gt_latents[:, target_ids, :]
             
         # 2. Get context latents (only visible patches)
-        # Note: In real I-JEPA, context encoder only sees context patches.
-        # We simulate this by slicing the patch embeddings.
+        # In real I-JEPA, context encoder runs full depth on context patches.
         x = self.context_encoder.patch_embed(img)
         x = x + self.context_encoder.pos_embed
-        context_latents = x[:, context_ids, :]
+        context_latents_shallow = x[:, context_ids, :]
+        
+        # Run through context encoder blocks
+        context_latents = self.context_encoder.forward_blocks(context_latents_shallow)
         
         # 3. Predict targets
         pred_latents = self.predictor(context_latents, context_ids, target_ids)
