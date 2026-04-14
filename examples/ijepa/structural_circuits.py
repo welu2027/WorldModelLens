@@ -76,14 +76,18 @@ class IJEPAStructuralTracer:
         num_heads = self.adapter.predictor.blocks[layer_idx].attn.num_heads
         head_results = []
 
-        for head_idx in range(num_heads):
+        def make_head_hook(h):
             def ablate_head_hook(out_heads, ctx):
                 out_heads = out_heads.clone()
-                out_heads[:, head_idx, :, :] = 0
+                out_heads[:, h, :, :] = 0
                 return out_heads
+            return ablate_head_hook
 
+        for head_idx in range(num_heads):
             self.wm.clear_hooks()
-            self.wm.add_hook(HookPoint(name=f"predictor.block_{layer_idx}.attn.heads", fn=ablate_head_hook))
+            hook_fn = make_head_hook(head_idx)
+            self.wm.add_hook(HookPoint(name=f"predictor.block_{layer_idx}.attn.heads", 
+                                        fn=hook_fn))
             
             corrupted_mse, _ = self.run_eval()
             importance = (corrupted_mse - clean_mse) / (clean_mse + 1e-8)
