@@ -229,6 +229,10 @@ class IJEPAPredictor(nn.Module):
         hooks = getattr(self, "hooks", None)
         timestep = getattr(self, "current_timestep", 0)
         
+        if hooks is not None:
+            ctx = HookContext(timestep=timestep, component="predictor.input")
+            x = hooks.apply(f"{self.prefix}input", timestep, x, ctx)
+        
         for i, block in enumerate(self.blocks):
             block_prefix = f"{self.prefix}block_{i}."
             x = block(x, hooks=hooks, timestep=timestep, prefix=block_prefix)
