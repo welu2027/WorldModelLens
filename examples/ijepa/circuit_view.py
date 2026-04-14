@@ -1,96 +1,120 @@
+import torch
 import networkx as nx
 import matplotlib.pyplot as plt
-from dummy_data import generate_ijepa_data
+import matplotlib.patches as patches
+import numpy as np
+from PIL import Image
+from world_model_lens import HookedWorldModel
+from world_model_lens.backends.ijepa_adapter import IJEPAAdapter
+from world_model_lens.core.config import WorldModelConfig
+from image_utils import get_sample_image, preprocess_image, get_ijepa_masks
+import os
 
-def visualize_circuit(
-    circuit_patches: list = ["patch_1", "patch_4", "patch_7"],
-    seed: int = 42
-):
-    """
-    Shows a 'Circuit View' highlighting a specific subset of patches
-    that represent a concept or predictive mechanism.
-    """
-    data = generate_ijepa_data(num_context_patches=25, seed=seed)
-    target_patch = data["target_patch"]
-    coords = data["patch_coords"]
-    attributions = data["attributions"]
-    
-    # 1. Filter edges for the circuit
-    circuit_edges = [(pid, target_patch) for pid in circuit_patches if pid in attributions]
-    
-    if not circuit_edges:
-        print("No valid circuit patches found in data.")
-        return
+class ThresholdCircuitVisualizer:
+    def __init__(self, threshold_pct=0.005):
+        self.threshold_pct = threshold_pct
+        self.raw_img = get_sample_image()
+        self.img_tensor = preprocess_image(self.raw_img)
+        
+        config = WorldModelConfig(backend="ijepa", d_embed=192, n_layers=6, n_heads=3)
+        self.adapter = IJEPAAdapter(config)
+        
+        checkpoint_path = "ijepa_mini.pth"
+        if os.path.exists(checkpoint_path):
+            print(f"Loading weights from {checkpoint_path}")
+            self.adapter.load_state_dict(torch.load(checkpoint_path, weights_only=True), strict=False)
+            
+        self.wm = HookedWorldModel(self.adapter, config)
+        self.wm.adapter.eval()
 
-    # 2. Build Graph
-    G = nx.DiGraph()
-    G.add_edges_from(circuit_edges)
-    
-    # Add other nodes as background (low alpha)
-    background_nodes = [pid for pid in data["context_patches"] if pid not in circuit_patches]
-    
-    # 3. Layout (Fixed Grid for circuit context)
-    pos = coords
-    
-    plt.figure(figsize=(10, 8))
-    
-    # 4. Draw Background
-    nx.draw_networkx_nodes(
-        G.to_undirected(), 
-        pos, 
-        nodelist=background_nodes,
-        node_color="#e0e0e0", 
-        node_size=600, 
-        alpha=0.3
-    )
-    
-    # 5. Draw Circuit Nodes
-    nx.draw_networkx_nodes(
-        G, 
-        pos, 
-        nodelist=circuit_patches,
-        node_color="#4CAF50", # Material Green
-        node_size=1200, 
-        edgecolors="white",
-        linewidths=3
-    )
-    
-    # 6. Draw Target Node
-    nx.draw_networkx_nodes(
-        G, 
-        pos, 
-        nodelist=[target_patch],
-        node_color="#F44336", # Material Red
-        node_size=1500, 
-        edgecolors="white",
-        linewidths=3
-    )
-    
-    # 7. Draw Circuit Edges
-    weights = [attributions[u] for u, v in G.edges()]
-    norm_weights = [w * 10 + 2 for w in weights]
-    
-    nx.draw_networkx_edges(
-        G, pos, 
-        width=norm_weights, 
-        edge_color="#4CAF50",
-        alpha=0.8,
-        arrowsize=25,
-        connectionstyle="arc3,rad=0.2"
-    )
-    
-    nx.draw_networkx_labels(G, pos, font_size=9, font_weight="bold")
+    def get_patch_rect(self, patch_id):
+        row, col = patch_id // 14, patch_id % 14
+        p_size = 224 // 14
+        return col * p_size, row * p_size, p_size, p_size
 
-    plt.title(f"I-JEPA Predictive Circuit View\nNodes: {', '.join(circuit_patches)}", fontsize=14, pad=20)
-    plt.axis('off')
-    
-    # Add a custom legend or text box
-    plt.text(0.05, 0.05, "Green: Predictive Circuit\nRed: Target Prediction", 
-             transform=plt.gca().transAxes, bbox=dict(facecolor='white', alpha=0.5))
-    
-    plt.tight_layout()
-    plt.show()
+    def visualize(self, target_id=97, layer_idx=-1):
+        # 1. Run Analysis
+        context_ids, _ = get_ijepa_masks(num_context=100)
+        if target_id in context_ids: context_ids.remove(target_id)
+        
+        self.adapter.last_context_ids = context_ids
+        self.adapter.last_target_ids = [target_id]
+        
+        with torch.no_grad():
+            self.wm.run_with_cache(self.img_tensor)
+            attn = self.adapter.predictor.blocks[layer_idx].attn.last_attn_weights
+            attributions = attn[0].mean(0)[-1, :len(context_ids)].cpu().numpy()
+
+        # 2. Dynamic Thresholding
+        # Identify all patches exceeding the threshold percentage of total energy
+        total_energy = attributions.sum()
+        circuit_indices = np.where(attributions > (total_energy * self.threshold_pct))[0]
+        
+        circuit_patches = [context_ids[i] for i in circuit_indices]
+        circuit_weights = [attributions[i] for i in circuit_indices]
+        
+        print(f"Found circuit of {len(circuit_patches)} patches using {self.threshold_pct*100}% threshold.")
+
+        # 3. Setup Layout
+        fig = plt.figure(figsize=(16, 10))
+        gs = fig.add_gridspec(1, 2, width_ratios=[1.2, 1])
+        ax_graph = fig.add_subplot(gs[0, 0])
+        ax_img = fig.add_subplot(gs[0, 1])
+        
+        # 4. Draw Graph
+        G = nx.DiGraph()
+        target_node = f"target_{target_id}"
+        for pid, w in zip(circuit_patches, circuit_weights):
+            G.add_edge(f"patch_{pid}", target_node, weight=float(w))
+            
+        pos = self.compute_radial_layout(G, target_node)
+        self.draw_graph(ax_graph, G, pos, target_node)
+        
+        # 5. Draw Image Grounding
+        self.draw_image(ax_img, target_id, circuit_patches)
+        
+        plt.suptitle(f"I-JEPA Dynamic Circuit View (Threshold > {self.threshold_pct*100}% energy)", fontsize=16)
+        plt.tight_layout()
+        
+        if os.environ.get("SAVE_PLOT"):
+            plt.savefig("circuit_view.png")
+            print("Circuit view saved to circuit_view.png")
+        else:
+            plt.show()
+
+    def compute_radial_layout(self, G, target_node):
+        pos = {target_node: np.array([0, 0])}
+        context_nodes = [n for n in G.nodes() if n != target_node]
+        for i, node in enumerate(context_nodes):
+            angle = 2 * np.pi * i / max(1, len(context_nodes))
+            radius = 1.0
+            pos[node] = np.array([radius * np.cos(angle), radius * np.sin(angle)])
+        return pos
+
+    def draw_graph(self, ax, G, pos, target_node):
+        weights = [G[u][v]['weight'] for u, v in G.edges()]
+        if weights:
+            max_w = max(weights)
+            nx.draw_networkx_edges(G, pos, width=[1 + 10*(w/max_w) for w in weights], 
+                                   edge_color=weights, edge_cmap=plt.cm.Greens, ax=ax, alpha=0.6)
+            
+        nx.draw_networkx_nodes(G, pos, nodelist=[target_node], node_color="#F44336", node_size=1500, ax=ax)
+        nx.draw_networkx_nodes(G, pos, nodelist=[n for n in G.nodes() if n != target_node], 
+                               node_color="#4CAF50", node_size=800, ax=ax)
+        nx.draw_networkx_labels(G, pos, font_size=8, font_color="white", ax=ax)
+        ax.axis('off')
+
+    def draw_image(self, ax, target_id, circuit_patches):
+        ax.imshow(self.raw_img.resize((224, 224)))
+        tx, ty, tw, th = self.get_patch_rect(target_id)
+        ax.add_patch(patches.Rectangle((tx, ty), tw, th, linewidth=3, edgecolor='#F44336', facecolor='none'))
+        
+        for pid in circuit_patches:
+            cx, cy, cw, ch = self.get_patch_rect(pid)
+            ax.add_patch(patches.Rectangle((cx, cy), cw, ch, linewidth=2, edgecolor='#4CAF50', facecolor='none', alpha=0.7))
+        ax.axis('off')
+        ax.set_title("Spatial Grounding")
 
 if __name__ == "__main__":
-    # Example: Visualizing a 'Top-3' circuit
-    visualize_circuit(circuit_patches=["patch_3", "patch_8", "patch_15"])
+    visualizer = ThresholdCircuitVisualizer()
+    visualizer.visualize(target_id=97)
