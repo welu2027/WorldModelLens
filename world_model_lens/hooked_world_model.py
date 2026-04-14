@@ -482,6 +482,12 @@ class HookedWorldModel:
             # apply hooks and cache via central helper
             state = self._apply_and_cache("state", t, state, hook_ctx, cache, names_filter)
 
+            # Sync hooks to adapter for internal component hooking
+            if hasattr(self.adapter, "hooks"):
+                self.adapter.hooks = self._hooks
+            if hasattr(self.adapter, "current_timestep"):
+                self.adapter.current_timestep = t
+
             posterior, obs_encoding = self.adapter.encode(
                 obs.unsqueeze(0), state.unsqueeze(0) if state.dim() == 1 else state
             )

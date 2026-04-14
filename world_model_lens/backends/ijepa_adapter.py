@@ -11,6 +11,7 @@ from world_model_lens.backends.registry import register
 from world_model_lens.core.types import WorldModelFamily
 from world_model_lens.core.config import WorldModelConfig
 
+from world_model_lens.core.hooks import HookContext
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -100,6 +101,9 @@ class VisionTransformer(nn.Module):
         ])
         self.norm = nn.LayerNorm(embed_dim)
         
+        # Identifier for hooking
+        self.prefix = ""
+        
         # Proper initialization for positional embeddings
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
@@ -108,39 +112,47 @@ class VisionTransformer(nn.Module):
         # 1. Patchify
         x = self.patch_embed(x)
         
-        # 2. Select specific patches if specified
+        # 2. Add Positional Embeddings (Slicing if needed)
+        pos_embed = self.pos_embed
         if patch_ids is not None:
-             # patch_ids can be a single list or a tensor [B, N_subset]
-             if isinstance(patch_ids, (list, tuple, torch.Tensor)):
-                 if isinstance(patch_ids, (list, tuple)):
-                     patch_ids = torch.tensor(patch_ids, device=x.device)
-                 if patch_ids.dim() == 1:
-                     # Same patches for all items in batch
-                     pos_embed = self.pos_embed[:, patch_ids, :]
-                     x = x[:, patch_ids, :]
-                 else:
-                     # Different patches for each item in batch
-                     # x is [B, N_full, C], pos_embed is [1, N_full, C]
-                     # We need to extract [B, N_subset, C]
-                     B, N_full, C = x.shape
-                     pos_embed = self.pos_embed.expand(B, -1, -1)
-                     
-                     # Gather selected patches
-                     x = torch.gather(x, 1, patch_ids.unsqueeze(-1).expand(-1, -1, C))
-                     pos_embed = torch.gather(pos_embed, 1, patch_ids.unsqueeze(-1).expand(-1, -1, C))
-        else:
-            pos_embed = self.pos_embed
+            # Handle list/tuple by converting to tensor
+            if isinstance(patch_ids, (list, tuple)):
+                patch_ids = torch.tensor(patch_ids, device=x.device)
             
+            if isinstance(patch_ids, torch.Tensor):
+                if patch_ids.dim() == 1:
+                    # Same patches for all items in batch
+                    pos_embed = self.pos_embed[:, patch_ids, :]
+                    x = x[:, patch_ids, :]
+                else:
+                    # Different patches for each item in batch
+                    B, N_subset, C = x.shape[0], patch_ids.shape[1], x.shape[2]
+                    pos_embed_full = self.pos_embed.expand(x.shape[0], -1, -1)
+                    
+                    # Gather selected patches from full x and pos_embed
+                    # Note: x here might already be patched or need to be full
+                    # In I-JEPA context encoder, we usually pass full image and select
+                    # But if x is already sliced, we just slice pos_embed
+                    if x.shape[1] == self.pos_embed.shape[1]: 
+                        x = torch.gather(x, 1, patch_ids.unsqueeze(-1).expand(-1, -1, C))
+                    pos_embed = torch.gather(pos_embed_full, 1, patch_ids.unsqueeze(-1).expand(-1, -1, C))
+
         # 3. Add positional embeddings to only the visible patches
         x = x + pos_embed
-        return self.forward_blocks(x)
+        return self.forward_blocks(x, hooks=getattr(self, "hooks", None), timestep=getattr(self, "current_timestep", 0))
 
-    def forward_blocks(self, x, mask=None):
+    def forward_blocks(self, x, mask=None, hooks=None, timestep=0):
         """Processes latent embeddings through the transformer blocks."""
         x = self.pos_drop(x)
-        for block in self.blocks:
+        for i, block in enumerate(self.blocks):
             x = block(x, mask=mask)
+            if hooks is not None:
+                ctx = HookContext(timestep=timestep, component=f"block_{i}")
+                x = hooks.apply(f"{self.prefix}block_{i}", timestep, x, ctx)
         x = self.norm(x)
+        if hooks is not None:
+            ctx = HookContext(timestep=timestep, component="norm")
+            x = hooks.apply(f"{self.prefix}norm", timestep, x, ctx)
         return x
 
 class IJEPAPredictor(nn.Module):
@@ -149,6 +161,7 @@ class IJEPAPredictor(nn.Module):
         super().__init__()
         self.encoder_embed_dim = encoder_embed_dim
         self.predictor_embed_dim = predictor_embed_dim
+        self.prefix = "predictor."
         
         # Bottleneck: Project from encoder space to predictor space
         self.predictor_embed = nn.Linear(encoder_embed_dim, predictor_embed_dim)
@@ -189,9 +202,20 @@ class IJEPAPredictor(nn.Module):
         
         # 3. Process concatenated sequence
         x = torch.cat([context_inputs, target_inputs], dim=1)
-        for block in self.blocks:
+        
+        hooks = getattr(self, "hooks", None)
+        timestep = getattr(self, "current_timestep", 0)
+        
+        for i, block in enumerate(self.blocks):
             x = block(x)
+            if hooks is not None:
+                ctx = HookContext(timestep=timestep, component=f"block_{i}")
+                x = hooks.apply(f"{self.prefix}block_{i}", timestep, x, ctx)
+                
         x = self.norm(x)
+        if hooks is not None:
+            ctx = HookContext(timestep=timestep, component="norm")
+            x = hooks.apply(f"{self.prefix}norm", timestep, x, ctx)
         
         # 4. Extract target predictions and project back
         target_preds = x[:, len(context_ids):, :]
@@ -255,6 +279,15 @@ class IJEPAAdapter(WorldModelAdapter):
         # Last known masks for inference/interpretability
         self.last_context_ids = None
         self.last_target_ids = None
+        
+        # Hooking support
+        self.hooks = None
+        self.current_timestep = 0
+        
+        # Set prefixes for components
+        self.context_encoder.prefix = "context_encoder."
+        self.target_encoder.prefix = "target_encoder."
+        self.predictor.prefix = "predictor."
 
     @property
     def capabilities(self) -> WorldModelCapabilities:
@@ -364,6 +397,10 @@ class IJEPAAdapter(WorldModelAdapter):
         """
         if obs.dim() == 3: obs = obs.unsqueeze(0)
         
+        # Sync hooks to submodule
+        self.context_encoder.hooks = self.hooks
+        self.context_encoder.current_timestep = self.current_timestep
+        
         # Generate/refresh masks if needed
         if self.last_context_ids is None:
             grid_size = self.context_encoder.patch_embed.grid_size
@@ -377,6 +414,10 @@ class IJEPAAdapter(WorldModelAdapter):
 
     def target_encode(self, obs: torch.Tensor) -> torch.Tensor:
         """Expose target encoder as a separate hook point for ground-truth comparison."""
+        # Sync hooks to submodules
+        self.target_encoder.hooks = self.hooks
+        self.target_encoder.current_timestep = self.current_timestep
+        
         with torch.no_grad():
             return self.target_encoder(obs)
 
@@ -403,6 +444,10 @@ class IJEPAAdapter(WorldModelAdapter):
             
         if self.last_target_ids is None:
             self.last_target_ids = list(range(10)) 
+            
+        # Sync hooks to predictor
+        self.predictor.hooks = self.hooks
+        self.predictor.current_timestep = self.current_timestep
             
         pred_latents = self.predictor(h, self.last_context_ids, self.last_target_ids)
         return pred_latents

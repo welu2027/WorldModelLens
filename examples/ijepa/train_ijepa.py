@@ -1,21 +1,34 @@
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-from ijepa_model import IJEPAModel
-from image_utils import get_sample_image, preprocess_image, get_ijepa_masks
+from world_model_lens.backends.ijepa_adapter import IJEPAAdapter
+from world_model_lens.core.config import WorldModelConfig
+from image_utils import get_sample_image, preprocess_image
 import time
 import os
 
-def train_ijepa_mini(epochs=100, steps_per_epoch=4, lr=1e-4):
-    print("Starting I-JEPA Mini-Training...")
-    model = IJEPAModel()
+def train_ijepa_mini(epochs=300, steps_per_epoch=4, lr=1e-4):
+    print("Starting I-JEPA Mini-Training with official IJEPAAdapter...")
+    
+    config = WorldModelConfig(
+        backend="ijepa",
+        d_embed=192,
+        n_layers=6,
+        n_heads=3,
+        predictor_embed_dim=384,
+        predictor_depth=4,
+        predictor_heads=6
+    )
+    
+    model = IJEPAAdapter(config)
     model.train()
     
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    # We only optimize the context encoder and predictor
+    # target_encoder is updated via EMA from context_encoder
+    params = list(model.context_encoder.parameters()) + list(model.predictor.parameters())
+    optimizer = optim.Adam(params, lr=lr)
     
     # We'll use a few "scenes" for training
-    # For this prototype, we'll use the same image with different masks 
-    # and potentially another sample if available.
     raw_img = get_sample_image()
     img_tensor = preprocess_image(raw_img)
     
@@ -25,20 +38,17 @@ def train_ijepa_mini(epochs=100, steps_per_epoch=4, lr=1e-4):
     for epoch in range(epochs):
         epoch_loss = 0
         for step in range(steps_per_epoch):
-            # Generate random masks for training
-            # context ~50-80 patches, target ~10-20 patches
-            context_ids, target_ids = get_ijepa_masks(num_context=70, num_target=10)
-            
             optimizer.zero_grad()
             
-            # Forward pass: Predict target latents from context
-            pred_latents, target_gt = model.predict(img_tensor, context_ids, target_ids)
-            
-            # Loss: MSE in latent space
-            loss = F.mse_loss(pred_latents, target_gt)
+            # Forward pass: compute_loss handles structured masking internally
+            # It uses the target encoder for GT and predicts from the context encoder
+            loss = model.compute_loss(img_tensor)
             
             loss.backward()
             optimizer.step()
+            
+            # EMA Update for Target Encoder
+            model.update_target_encoder(momentum=0.999)
             
             epoch_loss += loss.item()
         
@@ -56,4 +66,4 @@ def train_ijepa_mini(epochs=100, steps_per_epoch=4, lr=1e-4):
     return losses
 
 if __name__ == "__main__":
-    train_ijepa_mini(epochs=100)
+    train_ijepa_mini(epochs=300)
