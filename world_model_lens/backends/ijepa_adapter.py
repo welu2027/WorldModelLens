@@ -46,7 +46,7 @@ class Attention(nn.Module):
         
         self.last_attn_weights = None
 
-    def forward(self, x, mask=None):
+    def forward(self, x, mask=None, hooks=None, timestep=0, prefix=""):
         B, N, C = x.shape
         qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
@@ -54,15 +54,22 @@ class Attention(nn.Module):
         attn = (q @ k.transpose(-2, -1)) * self.scale
         
         if mask is not None:
-            # mask expected shape [B, num_heads, N, N]
             attn = attn.masked_fill(mask == 0, float('-inf'))
             
         attn = attn.softmax(dim=-1)
         self.last_attn_weights = attn.detach()
-        
         attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        # per-head weighted values: [B, num_heads, N, head_dim]
+        out_heads = (attn @ v)
+        
+        # [HOOK POINT] Head-level intervention
+        if hooks is not None:
+            ctx = HookContext(timestep=timestep, component="attn.heads")
+            out_heads = hooks.apply(f"{prefix}attn.heads", timestep, out_heads, ctx)
+
+        # Combine heads
+        x = out_heads.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -81,9 +88,21 @@ class Block(nn.Module):
             nn.Dropout(drop),
         )
 
-    def forward(self, x, mask=None):
-        x = x + self.attn(self.norm1(x), mask=mask)
-        x = x + self.mlp(self.norm2(x))
+    def forward(self, x, mask=None, hooks=None, timestep=0, prefix=""):
+        # 1. Attention path
+        attn_out = self.attn(self.norm1(x), mask=mask, hooks=hooks, timestep=timestep, prefix=prefix)
+        x = x + attn_out
+        
+        # 2. MLP path
+        mlp_in = self.norm2(x)
+        mlp_out = self.mlp(mlp_in)
+        
+        # [HOOK POINT] MLP output intervention
+        if hooks is not None:
+            ctx = HookContext(timestep=timestep, component="mlp")
+            mlp_out = hooks.apply(f"{prefix}mlp", timestep, mlp_out, ctx)
+            
+        x = x + mlp_out
         return x
 
 class VisionTransformer(nn.Module):
@@ -145,7 +164,11 @@ class VisionTransformer(nn.Module):
         """Processes latent embeddings through the transformer blocks."""
         x = self.pos_drop(x)
         for i, block in enumerate(self.blocks):
-            x = block(x, mask=mask)
+            # Internal block hooks are handled by passing hooks/prefix to block.forward
+            block_prefix = f"{self.prefix}block_{i}."
+            x = block(x, mask=mask, hooks=hooks, timestep=timestep, prefix=block_prefix)
+            
+            # Legacy/compatibility block-level hook (output of full block)
             if hooks is not None:
                 ctx = HookContext(timestep=timestep, component=f"block_{i}")
                 x = hooks.apply(f"{self.prefix}block_{i}", timestep, x, ctx)
@@ -207,7 +230,9 @@ class IJEPAPredictor(nn.Module):
         timestep = getattr(self, "current_timestep", 0)
         
         for i, block in enumerate(self.blocks):
-            x = block(x)
+            block_prefix = f"{self.prefix}block_{i}."
+            x = block(x, hooks=hooks, timestep=timestep, prefix=block_prefix)
+            
             if hooks is not None:
                 ctx = HookContext(timestep=timestep, component=f"block_{i}")
                 x = hooks.apply(f"{self.prefix}block_{i}", timestep, x, ctx)
