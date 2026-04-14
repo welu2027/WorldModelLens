@@ -19,6 +19,8 @@ from world_model_lens.core.world_state import WorldState
 from world_model_lens.core.world_trajectory import WorldTrajectory
 from world_model_lens.backends.base_adapter import WorldModelCapabilities
 from world_model_lens.core.hook_cache import HookCacheManager
+from world_model_lens.core.forward_runner import ForwardRunner
+from world_model_lens.core.latent_trajectory import LatentTrajectory
 
 
 class HookedWorldModel:
@@ -179,9 +181,7 @@ class HookedWorldModel:
         Returns:
             HookedWorldModel instance
         """
-        from world_model_lens.backends import BackendRegistry
-
-        registry = BackendRegistry()
+        from world_model_lens.backends import REGISTRY as registry
         adapter_cls = registry.get(backend)
         adapter = adapter_cls(config) if config else adapter_cls.from_checkpoint(path)
 
@@ -238,6 +238,240 @@ class HookedWorldModel:
         if state.dim() > 1 and state.shape[0] == 1:
             state = state.squeeze(0)
 
+        # Use ForwardRunner only when the adapter implements the newer
+        # latent-style encode signature (encode(obs) -> embedding) so we
+        # avoid breaking legacy adapters that require an h_prev/context arg.
+        use_forward_runner = False
+        try:
+            import inspect
+
+            sig = inspect.signature(self.adapter.encode)
+            # parameters includes 'self' so 2 means (self, obs)
+            if (
+                len(sig.parameters) <= 1
+                and hasattr(self.adapter, "dynamics")
+                and hasattr(self.adapter, "initial_state")
+            ):
+                use_forward_runner = True
+        except Exception:
+            use_forward_runner = False
+
+        # Disable ForwardRunner automatic path for now to preserve backward
+        # compatibility with the wide variety of adapter signatures in the
+        # repo. The ForwardRunner integration can be re-enabled behind an
+        # explicit opt-in once adapters converge on a stable API.
+        use_forward_runner = False
+
+        if use_forward_runner:
+            # Probe the adapter's encode return type to ensure it returns a
+            # single tensor (observation embedding). Some adapters accept a
+            # single-argument encode but still return (posterior, obs_enc)
+            # tuples — avoid using ForwardRunner in that case.
+            probe_ok = False
+            try:
+                with torch.no_grad():
+                    sample = observations[0]
+                    out = self.adapter.encode(sample)
+                if isinstance(out, torch.Tensor):
+                    probe_ok = True
+            except Exception:
+                probe_ok = False
+
+            if not probe_ok:
+                use_forward_runner = False
+
+        if use_forward_runner:
+            # Build a thin shim exposing the helpers ForwardRunner expects.
+            class _Shim:
+                def __init__(self, parent: "HookedWorldModel"):
+                    self._parent = parent
+                    self.name = parent.name
+                    # reuse the shared hook cache manager so hooks and caching
+                    # behave identically to the existing run_with_cache pipeline.
+                    self._hook_cache_manager = parent._hook_cache_manager
+
+                    # Adapter shim: expose a simplified encode(obs) -> Tensor
+                    # API expected by ForwardRunner while delegating to the
+                    # real adapter under the hood.
+                    class AdapterShim:
+                        def __init__(self, real):
+                            self._real = real
+
+                        def __getattr__(self, name):
+                            return getattr(self._real, name)
+
+                        def initial_state(self):
+                            # try no-arg then fall back to common signature
+                            try:
+                                return self._real.initial_state()
+                            except TypeError:
+                                try:
+                                    return self._real.initial_state(batch_size=1)
+                                except Exception:
+                                    return self._real.initial_state
+
+                        def encode(self, obs):
+                            # Try multiple adapter encode signatures and return
+                            # a single tensor. Prefer posterior probabilities if
+                            # the adapter returns (logits, probs) pairs.
+                            def _first_tensor(x):
+                                if isinstance(x, torch.Tensor):
+                                    return x
+                                if isinstance(x, (tuple, list)):
+                                    for el in x:
+                                        t = _first_tensor(el)
+                                        if t is not None:
+                                            return t
+                                return None
+
+                            try:
+                                out = self._real.encode(obs)
+                            except TypeError:
+                                try:
+                                    out = self._real.encode(obs, None)
+                                except Exception:
+                                    raise
+
+                            if isinstance(out, torch.Tensor):
+                                return out
+                            if isinstance(out, (tuple, list)):
+                                # common shapes: (posterior, obs_enc) or
+                                # ((logits, probs), obs_enc). Prefer probs when
+                                # available, otherwise first tensor.
+                                first = out[0]
+                                if isinstance(first, (tuple, list)) and len(first) > 1:
+                                    # try probs at index 1
+                                    if isinstance(first[1], torch.Tensor):
+                                        return first[1]
+                                t = _first_tensor(out)
+                                if t is not None:
+                                    return t
+                            raise TypeError("Adapter.encode returned unsupported type")
+
+                    self._adapter = AdapterShim(parent.adapter)
+
+                def _encode(self, obs, t, ctx, cache, names_filter):
+                    post = self._adapter.encode(obs.unsqueeze(0))
+                    return post.squeeze(0)
+
+                def _dynamics_and_prior(self, h, z, a_prev, t, ctx, cache, names_filter):
+                    prior = self._adapter.dynamics(h.unsqueeze(0) if h.dim() == 1 else h)
+                    prior = prior.squeeze(0) if prior.dim() > 1 else prior
+                    # return h (unchanged), raw logits (prior), and prior prob
+                    return h, prior, prior
+
+                def _posterior(self, h, obs_emb, t, ctx, cache, names_filter):
+                    # The adapter.encode call above produced the posterior; here
+                    # we interpret obs_emb as the posterior for compatibility.
+                    return obs_emb, obs_emb
+
+                def _compute_kl_and_cache(self, z_post, z_prior, t, ctx, cache, names_filter):
+                    # Compute KL if shapes match, otherwise None.
+                    if z_post.shape == z_prior.shape and z_post.dim() > 1:
+                        p = z_post.clamp(min=1e-8)
+                        q = z_prior.clamp(min=1e-8)
+                        p = p / p.sum(dim=-1, keepdim=True)
+                        q = q / q.sum(dim=-1, keepdim=True)
+                        kl = (p * (p.log() - q.log())).sum(dim=-1)
+                        return kl
+                    return None
+
+                def _compute_heads(self, h, z_post, t, ctx, cache, names_filter):
+                    # Delegate reward/value/actor predictions to adapter when
+                    # available to preserve existing behavior.
+                    reward = None
+                    value = None
+                    actor_logits = None
+                    caps = self._parent._get_capabilities()
+                    if caps.has_reward_head:
+                        try:
+                            reward = self._adapter.predict_reward(
+                                h.unsqueeze(0), z_post.unsqueeze(0)
+                            )
+                            if reward is not None:
+                                reward = reward.squeeze(0)
+                        except NotImplementedError:
+                            reward = None
+                    if caps.has_critic:
+                        try:
+                            if hasattr(self._adapter, "critic_forward"):
+                                value = self._adapter.critic_forward(
+                                    h.unsqueeze(0), z_post.unsqueeze(0)
+                                )
+                            else:
+                                value = self._adapter.predict_value(h.unsqueeze(0), None)
+                            if value is not None:
+                                value = value.squeeze(0)
+                        except NotImplementedError:
+                            value = None
+                    return reward, None, actor_logits, value
+
+                def _build_state(
+                    self,
+                    h,
+                    z_post_prob,
+                    z_prior_prob,
+                    t,
+                    action_seq,
+                    reward_val,
+                    cont_val,
+                    actor_logits_out,
+                    value_val,
+                ):
+                    return LatentTrajectory(states=[], env_name=self.name, episode_id=None)
+
+                def _apply_and_cache(self, name, t, tensor, ctx, cache, names_filter):
+                    return self._parent._apply_and_cache(name, t, tensor, ctx, cache, names_filter)
+
+                def _cache_prior_equivalent_at_t0(self, raw, prob, t, cache, names_filter):
+                    if cache is not None:
+                        try:
+                            cache.set_prior_equivalent(
+                                t,
+                                raw.detach(),
+                                prob.detach(),
+                                list(names_filter) if names_filter is not None else None,
+                            )
+                        except Exception:
+                            pass
+
+            shim = _Shim(self)
+            runner = ForwardRunner(shim)
+            latent_traj = runner.run_forward(
+                observations,
+                actions if actions is not None else torch.zeros_like(observations),
+                cache,
+                names_filter,
+                no_grad=True,
+            )
+            # Convert LatentTrajectory -> WorldTrajectory (best-effort)
+            states_out = []
+            for i, s in enumerate(latent_traj.states):
+                # try to extract common fields, fallback to placeholders
+                try:
+                    h = s.h_t
+                except Exception:
+                    h = torch.zeros(1)
+                try:
+                    z_post = s.z_posterior
+                except Exception:
+                    z_post = torch.zeros(1)
+                ws = WorldState(
+                    state=h.clone(),
+                    timestep=i,
+                    action=None,
+                    action_source=None,
+                    reward_pred=getattr(s, "reward_pred", None),
+                    value_pred=getattr(s, "value_pred", None),
+                    obs_encoding=getattr(s, "obs_encoding", None),
+                )
+                states_out.append(ws)
+            traj = WorldTrajectory(states=states_out, source="real")
+            if device:
+                traj = traj.to_device(device)
+                cache = cache.to_device(device)
+            return traj, cache
+
         for t in range(T):
             obs = observations[t]
             action = None
@@ -287,6 +521,20 @@ class HookedWorldModel:
                     cache,
                     names_filter,
                 )
+
+            # Check for optional target encoder (e.g. for I-JEPA/JEPA models)
+            if hasattr(self.adapter, "target_encode"):
+                target_encoding = self.adapter.target_encode(obs.unsqueeze(0))
+                if target_encoding is not None:
+                    target_encoding = target_encoding.squeeze(0)
+                    self._apply_and_cache(
+                        "target_encoding",
+                        t,
+                        target_encoding,
+                        HookContext(timestep=t, component="target_encoding", trajectory_so_far=states),
+                        cache,
+                        names_filter,
+                    )
 
             reward_pred = None
             if caps.has_reward_head:

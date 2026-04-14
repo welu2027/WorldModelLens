@@ -11,6 +11,7 @@ Features:
 """
 
 from typing import Any, Dict, List, Optional, Tuple, Callable
+from abc import ABC, abstractmethod
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -30,7 +31,52 @@ class SAEResult:
     reconstruction_loss: float
 
 
-class SparseAutoencoder(nn.Module):
+class SAEBase(nn.Module, ABC):
+    """Standardized SAE interface for trainer compatibility.
+
+    Implementations should provide `from_config(config, device)` to allow the
+    trainer to construct models in a single, standard way. Forward should
+    return `(reconstruction, sparse_h)` or `(reconstruction, sparse_h, mask)`.
+    """
+
+    @classmethod
+    @abstractmethod
+    def from_config(cls, config, device: Optional[torch.device] = None):
+        raise NotImplementedError
+
+    @abstractmethod
+    def encode(
+        self, x: torch.Tensor, *args, **kwargs
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def decode(self, h: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def compute_l0(self, h: torch.Tensor) -> torch.Tensor:
+        """Default L0 approximation (can be overridden)."""
+        return (h.abs() > 1e-8).float().sum(dim=-1).mean()
+
+    def forward(self, x: torch.Tensor, *args, **kwargs):
+        out = self.encode(x, *args, **kwargs)
+        if isinstance(out, tuple) and len(out) == 2:
+            h, mask = out
+        elif isinstance(out, tuple) and len(out) == 1:
+            h = out[0]
+            mask = None
+        else:
+            # if encode returns unexpected shape, assume encode already returned h
+            h = out
+            mask = None
+
+        recon = self.decode(h)
+        if mask is None:
+            return recon, h
+        return recon, h, mask
+
+
+class SparseAutoencoder(SAEBase):
     """Sparse Autoencoder for decomposing latent spaces.
 
     Learns a dictionary of features that can be activated sparsely.
@@ -85,6 +131,22 @@ class SparseAutoencoder(nn.Module):
 
         self.bottleneck_scale = nn.Parameter(torch.ones(n_features))
         self.bottleneck_bias = nn.Parameter(torch.zeros(n_features))
+
+    @classmethod
+    def from_config(cls, config, device: Optional[torch.device] = None):
+        """Construct from trainer SAEConfig-like object.
+
+        This provides a standardized constructor used by SAETrainer.
+        """
+        inst = cls(
+            input_dim=config.d_input,
+            n_features=config.n_boj,
+            hidden_dim=None,
+            tie_weights=config.tied_weights,
+        )
+        if device is not None:
+            inst.to(device)
+        return inst
 
     def encode(
         self,
@@ -240,7 +302,7 @@ class SparseAutoencoder(nn.Module):
         return next(self.parameters()).device
 
 
-class GatedSparseAutoencoder(nn.Module):
+class GatedSparseAutoencoder(SAEBase):
     """Gated SAE with better dead feature handling.
 
     Uses a gating mechanism to better handle feature activation.
@@ -268,6 +330,17 @@ class GatedSparseAutoencoder(nn.Module):
 
         nn.init.xavier_uniform_(self.encoder[0].weight)
         nn.init.xavier_uniform_(self.decoder.weight)
+
+    @classmethod
+    def from_config(cls, config, device: Optional[torch.device] = None):
+        inst = cls(input_dim=config.d_input, n_features=config.n_boj)
+        if device is not None:
+            inst.to(device)
+        return inst
+
+    def compute_l0(self, h: torch.Tensor) -> torch.Tensor:
+        """Approximate L0 from activations for compatibility."""
+        return (h.abs() > 1e-8).float().sum(dim=-1).mean()
 
     def encode(
         self,
@@ -477,3 +550,86 @@ class SAELayer:
         self._feature_cache = feature_activations
 
         return traj, cache
+
+
+# New feature: compact TopK ReLU Sparse Autoencoder class.
+class TopKSparseAutoencoder(SAEBase):
+    """Top-k ReLU Sparse Autoencoder.
+
+    Encoder: Linear(input_dim -> n_features)
+    Bottleneck: keep top-k activations per example, ReLU
+    Decoder: Linear(n_features -> input_dim)
+
+    compute_loss returns reconstruction MSE + l1 sparsity penalty.
+    """
+
+    def __init__(self, input_dim: int, n_features: int, k: int = 1, tie_weights: bool = False):
+        super().__init__()
+        self.input_dim = input_dim
+        self.n_features = n_features
+        self.k = int(k)
+
+        # initialize encoder weight first
+        self.encoder = nn.Linear(input_dim, n_features, bias=True)
+        nn.init.xavier_uniform_(self.encoder.weight)
+
+        if tie_weights:
+            # decoder uses a copied transpose of encoder weight at init
+            self.decoder = nn.Linear(n_features, input_dim, bias=False)
+            with torch.no_grad():
+                self.decoder.weight.copy_(self.encoder.weight.t())
+        else:
+            self.decoder = nn.Linear(n_features, input_dim, bias=True)
+            nn.init.xavier_uniform_(self.decoder.weight)
+
+    def topk_relu(self, h: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.k <= 0 or self.k >= h.shape[-1]:
+            out = F.relu(h)
+            mask = (out > 0).float()
+            return out, mask
+
+        vals, idx = torch.topk(h, self.k, dim=-1)
+        mask = torch.zeros_like(h).scatter_(-1, idx, 1.0)
+        out = h * mask
+        out = F.relu(out)
+        return out, mask
+
+    def encode(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        h = self.encoder(x)
+        return self.topk_relu(h)
+
+    def decode(self, h: torch.Tensor) -> torch.Tensor:
+        return self.decoder(h)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        h, mask = self.encode(x)
+        recon = self.decode(h)
+        return recon, h, mask
+
+    def compute_loss(
+        self, x: torch.Tensor, l1_weight: float = 1e-3
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        recon, h, mask = self.forward(x)
+        recon_loss = F.mse_loss(recon, x)
+        sparsity = h.abs().mean()
+        total = recon_loss + l1_weight * sparsity
+        return total, {
+            "reconstruction": float(recon_loss.item()),
+            "sparsity": float(sparsity.item()),
+            "total": float(total.item()),
+        }
+
+    @classmethod
+    def from_config(cls, config, device: Optional[torch.device] = None):
+        inst = cls(
+            input_dim=config.d_input,
+            n_features=config.n_boj,
+            k=config.k,
+            tie_weights=config.tied_weights,
+        )
+        if device is not None:
+            inst.to(device)
+        return inst
+
+    def compute_l0(self, h: torch.Tensor) -> torch.Tensor:
+        return (h.abs() > 1e-8).float().sum(dim=-1).mean()
