@@ -13,9 +13,9 @@ pip install -e .
 ```python
 import torch
 from world_model_lens import WorldModelConfig
-from world_model_lens.backends.generic_adapter import WorldModelAdapter
+from world_model_lens.backends.base_adapter import BaseModelAdapter
 
-class MyWorldModel(WorldModelAdapter):
+class MyWorldModel(BaseModelAdapter):
     def __init__(self, config):
         super().__init__(config)
         self.encoder = torch.nn.Linear(config.d_obs, config.d_h)

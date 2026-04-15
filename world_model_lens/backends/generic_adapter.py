@@ -47,7 +47,7 @@ if TYPE_CHECKING:
 
 
 @dataclass
-class WorldModelConfig:
+class AdapterConfig:
     """Configuration for any world model.
 
     This is intentionally minimal. Model-specific configs should
@@ -95,7 +95,7 @@ class WorldModelAdapter(ABC, nn.Module):
     All methods accept both batched [B, ...] and unbatched [...] tensors.
     """
 
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         nn.Module.__init__(self)
         self.config = config
         self._device = torch.device("cpu")

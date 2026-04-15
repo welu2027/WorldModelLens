@@ -8,7 +8,7 @@ All notable changes to World Model Lens will be documented here.
 - Initial release
 - Core abstractions: LatentState, LatentTrajectory, ActivationCache
 - Hook system for intercepting activations
-- WorldModelAdapter abstract base class
+- BaseModelAdapter abstract base class
 - DreamerV3 backend adapter
 - DreamerV2 backend adapter
 - IRIS backend adapter

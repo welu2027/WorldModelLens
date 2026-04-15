@@ -15,19 +15,18 @@ This adapter supports:
 - Video diffusion-based world models
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from world_model_lens.backends.generic_adapter import WorldModelAdapter, WorldModelConfig
-from world_model_lens.core.types import LatentType, DynamicsType, WorldModelFamily
+from world_model_lens.backends.base_adapter import BaseModelAdapter, AdapterConfig, WorldModelCapabilities
+from world_model_lens.core.types import WorldModelFamily
 
 
 class VideoEncoder(nn.Module):
     """Video encoder: video frames -> latent tokens."""
 
-    def __init__(self, in_channels: int = 3, latent_dim: int = 256, num_tokens: int = 256):
+    def __init__(self, in_channels: int = 3, latent_dim: int = 256):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_channels, 32, kernel_size=4, stride=2, padding=1),
@@ -40,17 +39,14 @@ class VideoEncoder(nn.Module):
             nn.ReLU(),
         )
         self.proj = nn.Linear(256 * 4 * 4, latent_dim)
-        self.num_tokens = num_tokens
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        B, T, C, H, W = x.shape
-        x = x.view(B * T, C, H, W)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch_size, time_steps, channels, height, width = x.shape
+        x = x.view(batch_size * time_steps, channels, height, width)
         x = x / 255.0 if x.max() > 1.0 else x
-        features = self.conv(x)
-        features = features.flatten(1)
+        features = self.conv(x).flatten(1)
         tokens = self.proj(features)
-        tokens = tokens.view(B, T, self.num_tokens, -1)
-        return tokens, tokens
+        return tokens.view(batch_size, time_steps, -1)
 
 
 class VideoDecoder(nn.Module):
@@ -71,12 +67,11 @@ class VideoDecoder(nn.Module):
         )
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        B, T, N, D = tokens.shape
-        x = tokens.flatten(2)
-        x = self.proj(x)
-        x = x.view(B * T, 256, 4, 4)
+        batch_size, time_steps, latent_dim = tokens.shape
+        x = self.proj(tokens.reshape(batch_size * time_steps, latent_dim))
+        x = x.view(batch_size * time_steps, 256, 4, 4)
         video = self.deconv(x)
-        return video.view(B, T, -1, video.shape[2], video.shape[3])
+        return video.view(batch_size, time_steps, -1, video.shape[2], video.shape[3])
 
 
 class VideoDynamicsTransformer(nn.Module):
@@ -97,55 +92,41 @@ class VideoDynamicsTransformer(nn.Module):
         )
 
     def forward(self, tokens: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        B, T, N, D = tokens.shape
-        seq_len = T * N
-        tokens = tokens.view(B, seq_len, D)
-
-        positions = torch.arange(seq_len, device=tokens.device).unsqueeze(0).expand(B, -1)
+        batch_size, time_steps, dim = tokens.shape
+        positions = torch.arange(time_steps, device=tokens.device).unsqueeze(0).expand(batch_size, -1)
         tokens = tokens + self.pos_embedding(positions)
-
-        output = self.transformer(tokens, src_key_padding_mask=mask)
-        return output.view(B, T, N, D)
+        return self.transformer(tokens, src_key_padding_mask=mask)
 
 
-class VideoWorldModelAdapter(WorldModelAdapter):
-    """Adapter for Video World Models (WorldDreamer-style).
+class VideoWorldModelAdapter(BaseModelAdapter):
+    """Adapter for Video World Models (WorldDreamer-style)."""
 
-    These models predict future video frames from past observations:
-    - Latent video encoding
-    - Transformer-based dynamics
-    - Video decoder for reconstruction
-
-    This adapter is primarily a non-RL video prediction model,
-    but can be extended for RL with reward prediction.
-    """
-
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         super().__init__(config)
         self.config = config
 
-        self.encoder = VideoEncoder(
-            in_channels=3,
-            latent_dim=config.d_embed,
-            num_tokens=config.vocab_size,
-        )
+        self.encoder = VideoEncoder(in_channels=3, latent_dim=config.d_embed)
         self.decoder = VideoDecoder(latent_dim=config.d_embed, out_channels=3)
-        self.dynamics = VideoDynamicsTransformer(
+        self.dynamics_model = VideoDynamicsTransformer(
             d_model=config.d_embed,
             n_layers=config.n_layers,
             n_heads=config.n_heads,
+        )
+        self._capabilities = WorldModelCapabilities(
+            has_decoder=True,
+            has_reward_head=False,
+            has_continue_head=False,
+            has_actor=False,
+            has_critic=False,
+            uses_actions=False,
+            is_rl_trained=False,
         )
 
         self._device = torch.device("cpu")
 
     @property
     def hook_point_names(self) -> List[str]:
-        return [
-            "encoder",
-            "decoder",
-            "dynamics",
-            "latent_tokens",
-        ]
+        return ["encoder", "decoder", "dynamics", "latent_tokens"]
 
     @property
     def world_model_family(self) -> WorldModelFamily:
@@ -153,129 +134,96 @@ class VideoWorldModelAdapter(WorldModelAdapter):
 
     def encode(
         self,
-        observation: torch.Tensor,
-        context: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Encode video frames to latent tokens.
-
-        Args:
-            observation: Video tensor [B, T, C, H, W] or [T, C, H, W]
-
-        Returns:
-            Tuple of (latent tokens, observation encoding)
-        """
-        if observation.dim() == 4:
-            observation = observation.unsqueeze(0)
-        if observation.dim() == 5:
-            observation = observation.unsqueeze(0)
-
-        tokens, obs_encoding = self.encoder(observation)
-        return tokens, obs_encoding
-
-    def dynamics(
-        self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Predict future latent tokens (video dynamics).
-
-        Args:
-            state: Current latent tokens [B, T, N, D]
-            action: Optional action (can be used for conditioned prediction)
-
-        Returns:
-            Predicted next latent tokens
-        """
-        predicted = self.dynamics(state)
-        return predicted
+        obs: torch.Tensor,
+        h_prev: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Encode video frames to latent tokens."""
+        del h_prev
+        if obs.dim() == 4:
+            obs = obs.unsqueeze(1)
+        elif obs.dim() == 3:
+            obs = obs.unsqueeze(0).unsqueeze(1)
+        z = self.encoder(obs)
+        return z, z
 
     def transition(
         self,
-        state: torch.Tensor,
+        h: torch.Tensor,
+        z: torch.Tensor,
         action: Optional[torch.Tensor] = None,
-        input_: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Full transition with dynamics."""
-        return self.dynamics(state, action)
+        """Predict future latent tokens."""
+        del h, action
+        if z.dim() == 2:
+            z = z.unsqueeze(1)
+        return self.dynamics_model(z)
 
-    def decode(
+    def dynamics(self, h: torch.Tensor) -> torch.Tensor:
+        """Continuous video latents use the current state as the prior carrier."""
+        if h.dim() == 2:
+            h = h.unsqueeze(1)
+        return h
+
+    def sample_z(
         self,
-        state: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
-        """Decode latent tokens to video frames.
-
-        Args:
-            state: Latent tokens [B, T, N, D]
-
-        Returns:
-            Reconstructed video [B, T, C, H, W]
-        """
-        return self.decoder(state)
-
-    def predict_reward(
-        self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
-    ) -> None:
-        """Video models typically don't predict rewards."""
-        return None
-
-    def actor_forward(
-        self,
-        state: torch.Tensor,
-    ) -> None:
-        """Video models don't have actors."""
-        return None
-
-    def sample_state(
-        self,
-        logits: torch.Tensor,
+        logits_or_repr: torch.Tensor,
         temperature: float = 1.0,
         sample: bool = True,
     ) -> torch.Tensor:
-        """Passthrough for continuous latents."""
-        return logits
+        del temperature, sample
+        return logits_or_repr
+
+    def decode(self, h: torch.Tensor, z: torch.Tensor) -> Optional[torch.Tensor]:
+        """Decode latent tokens to video frames."""
+        del h
+        if z.dim() == 2:
+            z = z.unsqueeze(1)
+        return self.decoder(z)
+
+    def predict_reward(self, h: torch.Tensor, z: torch.Tensor) -> None:
+        del h, z
+        return None
+
+    def actor_forward(self, h: torch.Tensor, z: torch.Tensor) -> None:
+        del h, z
+        return None
 
     def imagine(
         self,
-        start_state: torch.Tensor,
-        actions: Optional[torch.Tensor] = None,
+        start_h: torch.Tensor,
+        start_z: torch.Tensor,
+        action_sequence: Optional[torch.Tensor] = None,
         horizon: int = 50,
-        temperature: float = 1.0,
-    ) -> Tuple[torch.Tensor, List[Optional[torch.Tensor]]]:
-        """Run imagined rollout for video prediction.
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Run imagined rollout for video prediction."""
+        del action_sequence
+        h_t = start_h if start_h.dim() > 1 else start_h.unsqueeze(0)
+        z_t = start_z if start_z.dim() > 1 else start_z.unsqueeze(0)
+        if h_t.dim() == 2:
+            h_t = h_t.unsqueeze(1)
+        if z_t.dim() == 2:
+            z_t = z_t.unsqueeze(1)
 
-        Args:
-            start_state: Starting latent tokens
-            actions: Optional actions
-            horizon: Number of frames to predict
-            temperature: Sampling temperature
-
-        Returns:
-            Tuple of (predicted video tokens, reward predictions)
-        """
-        state = start_state
-        state_seq = [state]
-
+        h_seq = [h_t.squeeze(0)]
+        z_seq = [z_t.squeeze(0)]
         for _ in range(horizon):
-            next_state = self.dynamics(state, actions)
-            state_seq.append(next_state)
-            state = next_state
-
-        video = self.decode(torch.stack(state_seq, dim=1))
-        return state_seq, [None] * len(state_seq)
+            h_t = self.transition(h_t, z_t)
+            z_t = self.sample_z(self.dynamics(h_t))
+            h_seq.append(h_t.squeeze(0))
+            z_seq.append(z_t.squeeze(0))
+        return torch.stack(h_seq, dim=0), torch.stack(z_seq, dim=0)
 
     def initial_state(
         self,
         batch_size: int = 1,
         device: Optional[torch.device] = None,
-    ) -> torch.Tensor:
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Initialize starting state."""
         if device is None:
             device = self._device
-        return torch.zeros(
-            batch_size, 1, self.config.vocab_size, self.config.d_embed, device=device
-        )
+        h = torch.zeros(batch_size, 1, self.config.d_embed, device=device)
+        z = torch.zeros(batch_size, 1, self.config.d_embed, device=device)
+        return h, z
 
     def to(self, device: torch.device) -> "VideoWorldModelAdapter":
         super().to(device)
@@ -291,7 +239,7 @@ class VideoWorldModelAdapter(WorldModelAdapter):
         return self
 
 
-from world_model_lens.backends.registry import REGISTRY, register
+from world_model_lens.backends.registry import register
 from world_model_lens.core.types import WorldModelFamily
 
 register(

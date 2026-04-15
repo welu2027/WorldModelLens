@@ -15,7 +15,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from world_model_lens.backends.base_adapter import WorldModelAdapter, WorldModelCapabilities
+from world_model_lens.backends.base_adapter import BaseModelAdapter, WorldModelCapabilities
 
 
 class ToyVideoEncoder(nn.Module):
@@ -138,7 +138,7 @@ class ToyVideoWorldModel(nn.Module):
         return self.decoder(z)
 
 
-class ToyVideoAdapter(WorldModelAdapter):
+class ToyVideoAdapter(BaseModelAdapter):
     """Adapter for toy video world model.
 
     This adapter implements a simple video prediction model with:

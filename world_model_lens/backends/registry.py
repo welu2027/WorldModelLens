@@ -163,7 +163,7 @@ def register(
 
     Usage:
         @register("dreamerv3", WorldModelFamily.DREAMER, "DreamerV3 implementation")
-        class DreamerV3Adapter(WorldModelAdapter):
+        class DreamerV3Adapter(BaseModelAdapter):
             ...
     """
 
