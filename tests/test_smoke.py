@@ -15,7 +15,7 @@ def test_all_exports_importable():
         HookContext,
         HookRegistry,
         WorldModelConfig,
-        WorldModelAdapter,
+        BaseModelAdapter,
         WorldDynamics,
         WorldModelOutput,
     )

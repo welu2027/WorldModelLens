@@ -1,42 +1,21 @@
 """Robotics/embodied world model adapter.
 
-Reference: "Rocketship: Efficient and Safe Real-Time Reinforcement Learning"
-          "Latent World Models for Robotic Manipulation"
-          "VC-1: Generalist Agents"
-
-Robotics world models for embodied agents:
-- Latent dynamics (RSSM, JEPA, etc.)
-- Visual-tactile-proprioceptive fusion
-- Manipulation and locomotion planning
-- Part-centric representations
-
-This adapter supports:
-- General robotics manipulation models
-- Mobile manipulation models
-- Bimanual manipulation models
+Reference: robotics latent world models for manipulation and locomotion.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from world_model_lens.backends.generic_adapter import WorldModelAdapter, WorldModelConfig
-from world_model_lens.core.types import LatentType, DynamicsType, WorldModelFamily
+from world_model_lens.backends.base_adapter import BaseModelAdapter, AdapterConfig, WorldModelCapabilities
+from world_model_lens.core.types import WorldModelFamily
 
 
 class RoboticsEncoder(nn.Module):
     """Multi-modal encoder for robotics (image, proprio, tactile)."""
 
-    def __init__(
-        self,
-        image_channels: int = 3,
-        proprio_dim: int = 14,
-        tactile_dim: int = 0,
-        d_latent: int = 256,
-    ):
+    def __init__(self, image_channels: int = 3, proprio_dim: int = 14, tactile_dim: int = 0, d_latent: int = 256):
         super().__init__()
-
         self.image_encoder = nn.Sequential(
             nn.Conv2d(image_channels, 32, kernel_size=4, stride=2, padding=1),
             nn.ReLU(),
@@ -46,51 +25,30 @@ class RoboticsEncoder(nn.Module):
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((4, 4)),
         )
-
-        self.proprio_encoder = nn.Sequential(
-            nn.Linear(proprio_dim, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-        )
-
+        self.proprio_encoder = nn.Sequential(nn.Linear(proprio_dim, 64), nn.ReLU(), nn.Linear(64, 64))
+        self.tactile_dim = tactile_dim
         if tactile_dim > 0:
-            self.tactile_encoder = nn.Sequential(
-                nn.Linear(tactile_dim, 32),
-                nn.ReLU(),
-                nn.Linear(32, 32),
-            )
+            self.tactile_encoder = nn.Sequential(nn.Linear(tactile_dim, 32), nn.ReLU(), nn.Linear(32, 32))
             tactile_out = 32
         else:
             self.tactile_encoder = None
             tactile_out = 0
-
         total_dim = 128 * 16 + 64 + tactile_out
-        self.fusion = nn.Sequential(
-            nn.Linear(total_dim, d_latent),
-            nn.ReLU(),
-            nn.Linear(d_latent, d_latent),
-        )
+        self.fusion = nn.Sequential(nn.Linear(total_dim, d_latent), nn.ReLU(), nn.Linear(d_latent, d_latent))
 
-    def forward(
-        self,
-        image: torch.Tensor,
-        proprio: Optional[torch.Tensor] = None,
-        tactile: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    def forward(self, image: torch.Tensor, proprio: Optional[torch.Tensor] = None, tactile: Optional[torch.Tensor] = None) -> torch.Tensor:
         img_features = self.image_encoder(image).flatten(1)
-
         if proprio is not None:
             proprio_features = self.proprio_encoder(proprio)
         else:
-            proprio_features = torch.zeros(img_features.shape[0], 64, device=img_features.device)
-
+            proprio_features = torch.zeros(image.shape[0], 64, device=image.device)
         if tactile is not None and self.tactile_encoder is not None:
             tactile_features = self.tactile_encoder(tactile)
+        elif self.tactile_encoder is not None:
+            tactile_features = torch.zeros(image.shape[0], 32, device=image.device)
         else:
-            tactile_features = torch.zeros(img_features.shape[0], 32, device=img_features.device)
-
-        fused = torch.cat([img_features, proprio_features, tactile_features], dim=-1)
-        return self.fusion(fused)
+            tactile_features = torch.zeros(image.shape[0], 0, device=image.device)
+        return self.fusion(torch.cat([img_features, proprio_features, tactile_features], dim=-1))
 
 
 class RoboticsDynamics(nn.Module):
@@ -107,35 +65,18 @@ class RoboticsDynamics(nn.Module):
         )
 
     def forward(self, state: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([state, action], dim=-1)
-        return self.net(x)
+        return self.net(torch.cat([state, action], dim=-1))
 
 
-class RoboticsAdapter(WorldModelAdapter):
-    """Adapter for Robotics/Embodied world models.
+class RoboticsAdapter(BaseModelAdapter):
+    """Adapter for Robotics/Embodied world models."""
 
-    These models handle:
-    - Multi-modal perception (image, proprioception, tactile)
-    - Latent dynamics for manipulation/locomotion
-    - Object-centric and part-centric representations
-    """
-
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         super().__init__(config)
         self.config = config
-
-        self.encoder = RoboticsEncoder(
-            image_channels=3,
-            proprio_dim=config.d_action + 7,
-            tactile_dim=0,
-            d_latent=config.d_h,
-        )
-        self.dynamics = RoboticsDynamics(config.d_h, config.d_action)
-        self.decoder = nn.Sequential(
-            nn.Linear(config.d_h, 128),
-            nn.ReLU(),
-            nn.Linear(128, 64 * 4 * 4),
-        )
+        self.encoder = RoboticsEncoder(image_channels=3, proprio_dim=config.d_action + 7, tactile_dim=0, d_latent=config.d_h)
+        self.dynamics_model = RoboticsDynamics(config.d_h, config.d_action)
+        self.decoder = nn.Sequential(nn.Linear(config.d_h, 128), nn.ReLU(), nn.Linear(128, 64 * 4 * 4))
         self.image_decoder = nn.Sequential(
             nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1),
             nn.ReLU(),
@@ -144,112 +85,78 @@ class RoboticsAdapter(WorldModelAdapter):
             nn.ConvTranspose2d(16, 3, kernel_size=4, stride=2, padding=1),
         )
         self.reward_predictor = nn.Linear(config.d_h, 1)
-
+        self._capabilities = WorldModelCapabilities(
+            has_decoder=True,
+            has_reward_head=True,
+            has_continue_head=False,
+            has_actor=False,
+            has_critic=False,
+            uses_actions=True,
+            is_rl_trained=True,
+        )
         self._device = torch.device("cpu")
 
     @property
     def hook_point_names(self) -> List[str]:
-        return [
-            "image_encoder",
-            "proprio_encoder",
-            "fusion",
-            "dynamics",
-            "decoder",
-            "latent_state",
-        ]
+        return ["image_encoder", "proprio_encoder", "fusion", "dynamics", "decoder", "latent_state"]
 
     @property
     def world_model_family(self) -> WorldModelFamily:
         return WorldModelFamily.ROBOTICS
 
-    def encode(
-        self,
-        observation: torch.Tensor,
-        context: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Encode robotics observation to latent state.
-
-        Args:
-            observation: Dict with 'image', 'proprio', 'tactile' keys, or image tensor
-            context: Optional previous state
-
-        Returns:
-            Tuple of (latent state, observation encoding)
-        """
-        if isinstance(observation, dict):
-            image = observation.get("image", observation.get("rgb"))
-            proprio = observation.get("proprio")
-            tactile = observation.get("tactile")
-            obs_encoding = self.encoder(image, proprio, tactile)
+    def encode(self, obs: torch.Tensor, h_prev: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        del h_prev
+        if isinstance(obs, dict):
+            image = obs.get("image", obs.get("rgb"))
+            proprio = obs.get("proprio")
+            tactile = obs.get("tactile")
+            z = self.encoder(image, proprio, tactile)
         else:
-            if observation.dim() == 5:
-                B, T, C, H, W = observation.shape
-                observation = observation.view(B * T, C, H, W)
-                obs_encoding = self.encoder(observation)
-                obs_encoding = obs_encoding.view(B, T, -1).mean(dim=1)
-            else:
-                obs_encoding = self.encoder(observation)
+            if obs.dim() == 3:
+                obs = obs.unsqueeze(0)
+            z = self.encoder(obs)
+        return z, z
 
-        return obs_encoding, obs_encoding
-
-    def dynamics(
-        self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Predict next latent state."""
+    def transition(self, h: torch.Tensor, z: torch.Tensor, action: Optional[torch.Tensor] = None) -> torch.Tensor:
+        del h
+        if z.dim() == 1:
+            z = z.unsqueeze(0)
         if action is None:
-            action = torch.zeros(state.shape[0], self.config.d_action, device=state.device)
-        return self.dynamics(state, action)
+            action = torch.zeros(z.shape[0], self.config.d_action, device=z.device)
+        elif action.dim() == 1:
+            action = action.unsqueeze(0)
+        return self.dynamics_model(z, action)
 
-    def transition(
-        self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
-        input_: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """State transition."""
-        return self.dynamics(state, action)
+    def dynamics(self, h: torch.Tensor) -> torch.Tensor:
+        return h if h.dim() > 1 else h.unsqueeze(0)
 
-    def decode(self, state: torch.Tensor) -> Optional[torch.Tensor]:
-        """Decode latent to image (optional)."""
-        x = self.decoder(state)
-        x = x.view(-1, 64, 4, 4)
+    def sample_z(self, logits_or_repr: torch.Tensor, temperature: float = 1.0, sample: bool = True) -> torch.Tensor:
+        del temperature, sample
+        return logits_or_repr
+
+    def decode(self, h: torch.Tensor, z: torch.Tensor) -> Optional[torch.Tensor]:
+        del h
+        if z.dim() == 1:
+            z = z.unsqueeze(0)
+        x = self.decoder(z).view(-1, 64, 4, 4)
         return self.image_decoder(x)
 
-    def predict_reward(
-        self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
-    ) -> Optional[torch.Tensor]:
-        """Predict reward."""
-        return self.reward_predictor(state)
+    def predict_reward(self, h: torch.Tensor, z: torch.Tensor) -> Optional[torch.Tensor]:
+        del h
+        if z.dim() == 1:
+            z = z.unsqueeze(0)
+        return self.reward_predictor(z)
 
-    def actor_forward(
-        self,
-        state: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
-        """Predict action (optional)."""
+    def actor_forward(self, h: torch.Tensor, z: torch.Tensor) -> None:
+        del h, z
         return None
 
-    def sample_state(
-        self,
-        logits: torch.Tensor,
-        temperature: float = 1.0,
-        sample: bool = True,
-    ) -> torch.Tensor:
-        """Passthrough for continuous latents."""
-        return logits
-
-    def initial_state(
-        self,
-        batch_size: int = 1,
-        device: Optional[torch.device] = None,
-    ) -> torch.Tensor:
-        """Initialize starting state."""
+    def initial_state(self, batch_size: int = 1, device: Optional[torch.device] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         if device is None:
             device = self._device
-        return torch.zeros(batch_size, self.config.d_h, device=device)
+        h = torch.zeros(batch_size, self.config.d_h, device=device)
+        z = torch.zeros(batch_size, self.config.d_h, device=device)
+        return h, z
 
     def to(self, device: torch.device) -> "RoboticsAdapter":
         super().to(device)
@@ -265,7 +172,7 @@ class RoboticsAdapter(WorldModelAdapter):
         return self
 
 
-from world_model_lens.backends.registry import REGISTRY, register
+from world_model_lens.backends.registry import register
 from world_model_lens.core.types import WorldModelFamily
 
 register(

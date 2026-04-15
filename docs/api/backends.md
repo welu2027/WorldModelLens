@@ -1,11 +1,11 @@
 # Backends API
 
 Adapters for connecting any world model architecture to the World Model Lens analysis tools.
-All adapters extend `WorldModelAdapter` and only require `encode()` and `dynamics()` to be implemented.
+All adapters extend `BaseModelAdapter` and only require `encode()` and `dynamics()` to be implemented.
 
 ## Base
 
-### WorldModelAdapter
+### BaseModelAdapter
 
 ```{eval-rst}
 .. automodule:: world_model_lens.backends.base_adapter
@@ -17,7 +17,7 @@ All adapters extend `WorldModelAdapter` and only require `encode()` and `dynamic
 ### GenericAdapter
 
 ```{eval-rst}
-.. automodule:: world_model_lens.backends.generic_adapter
+.. automodule:: world_model_lens.backends.base_adapter
    :members:
    :undoc-members:
    :show-inheritance:

@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
-from world_model_lens.backends.generic_adapter import WorldModelAdapter
+from world_model_lens.backends.base_adapter import BaseModelAdapter
 from world_model_lens.core.types import WorldModelConfig, WorldState
 
 
@@ -257,8 +257,8 @@ class FeatureBinding(nn.Module):
         return torch.stack(similarities).mean() if similarities else torch.tensor(0.0)
 
 
-class SyntheticWorldModelAdapter(WorldModelAdapter):
-    """WorldModelAdapter wrapper for synthetic models."""
+class SyntheticWorldModelAdapter(BaseModelAdapter):
+    """BaseModelAdapter wrapper for synthetic models."""
 
     def __init__(self, model: nn.Module, config: Optional[WorldModelConfig] = None):
         super().__init__(model if hasattr(model, "encode") else None)

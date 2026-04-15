@@ -41,10 +41,10 @@ class HookedWorldModel:
 
     Example:
         >>> from world_model_lens import HookedWorldModel, WorldModelConfig
-        >>> from world_model_lens.backends.generic_adapter import WorldModelAdapter
+        >>> from world_model_lens.backends.base_adapter import BaseModelAdapter
         >>>
         >>> # Your world model adapter
-        >>> class MyModel(WorldModelAdapter):
+        >>> class MyModel(BaseModelAdapter):
         ...     def encode(self, obs, context=None):
         ...         return state, encoding
         ...     def dynamics(self, state, action=None):
@@ -65,7 +65,7 @@ class HookedWorldModel:
         """Initialize wrapper.
 
         Args:
-            adapter: Any WorldModelAdapter implementation
+            adapter: Any BaseModelAdapter implementation
             config: WorldModelConfig or dict-like config
             name: Optional name for this instance
         """

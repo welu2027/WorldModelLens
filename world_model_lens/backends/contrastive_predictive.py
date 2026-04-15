@@ -1,28 +1,11 @@
-"""Contrastive/Predictive world model adapter (CWM, SPR-style).
+"""Contrastive/Predictive world model adapter (CWM, SPR-style)."""
 
-Reference: "Unsupervised Semantic-Based Planning with Learned Semantic Dynamics" (CWM)
-          "Unsupervised Learning of Object Keypoints for World Models" (CWM)
-          "Learning Latent Dynamics for Planning from Pixels" (PlaNet)
-          "Decoupling Value and Policy for Control in Latent Space" (SPR, etc.)
-
-Contrastive/Predictive world models learn representations by:
-- Predicting future latent states via contrastive loss
-- Using momentum encoders (like BYOL, MoCo)
-- Self-predictive representations (SPR, CWM)
-
-This adapter supports:
-- CWM: Semantic-based planning with learned semantic dynamics
-- SPR: Self-predictive representations for control
-- Generic contrastive latent dynamics models
-"""
-
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from world_model_lens.backends.generic_adapter import WorldModelAdapter, WorldModelConfig
-from world_model_lens.core.types import LatentType, DynamicsType, WorldModelFamily
+from world_model_lens.backends.base_adapter import BaseModelAdapter, AdapterConfig, WorldModelCapabilities
+from world_model_lens.core.types import WorldModelFamily
 
 
 class ContrastiveEncoder(nn.Module):
@@ -41,7 +24,7 @@ class ContrastiveEncoder(nn.Module):
 
 
 class MomentumEncoder(nn.Module):
-    """Momentum encoder for contrastive learning (like MoCo)."""
+    """Momentum encoder for contrastive learning."""
 
     def __init__(self, encoder: nn.Module, m: float = 0.99):
         super().__init__()
@@ -69,149 +52,91 @@ class LatentDynamics(nn.Module):
         )
 
     def forward(self, z: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
-        x = torch.cat([z, action], dim=-1)
-        return self.net(x)
+        return self.net(torch.cat([z, action], dim=-1))
 
 
-class ContrastiveAdapter(WorldModelAdapter):
-    """Adapter for Contrastive/Predictive world models (CWM, SPR-style).
+class ContrastiveAdapter(BaseModelAdapter):
+    """Adapter for Contrastive/Predictive world models (CWM, SPR-style)."""
 
-    These models learn latent dynamics through:
-    - Contrastive loss between predicted and actual future latents
-    - Momentum encoders for stable representation
-    - Self-predictive representations
-
-    Architecture:
-    - Encoder: observation -> latent
-    - Dynamics: (latent, action) -> next latent prediction
-    - Projector: latent -> contrastive embedding
-    - Predictor: latent -> predicted embedding (for contrastive)
-    """
-
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         super().__init__(config)
         self.config = config
-
         d_latent = config.d_h
-
         self.encoder = ContrastiveEncoder(config.d_obs, d_latent)
         self.momentum_encoder = MomentumEncoder(self.encoder, m=0.99)
         self.projector = nn.Linear(d_latent, d_latent)
         self.predictor = nn.Linear(d_latent, d_latent)
-        self.dynamics = LatentDynamics(d_latent, config.d_action)
-
+        self.dynamics_model = LatentDynamics(d_latent, config.d_action)
+        self._capabilities = WorldModelCapabilities(
+            has_decoder=False,
+            has_reward_head=False,
+            has_continue_head=False,
+            has_actor=False,
+            has_critic=False,
+            uses_actions=True,
+            is_rl_trained=False,
+        )
         self._device = torch.device("cpu")
 
     @property
     def hook_point_names(self) -> List[str]:
-        return [
-            "encoder",
-            "projector",
-            "predictor",
-            "dynamics",
-            "latent",
-        ]
+        return ["encoder", "projector", "predictor", "dynamics", "latent"]
 
     @property
     def world_model_family(self) -> WorldModelFamily:
         return WorldModelFamily.CONTRASTIVE_PREDICTIVE
 
-    def encode(
-        self,
-        observation: torch.Tensor,
-        context: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Encode observation to latent."""
-        if observation.dim() > 1:
-            observation = observation.flatten(1)
-
-        if observation.dim() == 1:
-            observation = observation.unsqueeze(0)
-
-        z = self.encoder(observation)
+    def encode(self, obs: torch.Tensor, h_prev: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        del h_prev
+        if obs.dim() > 2:
+            obs = obs.flatten(start_dim=1)
+        elif obs.dim() == 1:
+            obs = obs.unsqueeze(0)
+        z = self.encoder(obs)
         return z, z
 
-    def dynamics(
-        self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Predict next latent (prior/dynamics)."""
+    def transition(self, h: torch.Tensor, z: torch.Tensor, action: Optional[torch.Tensor] = None) -> torch.Tensor:
+        del h
+        if z.dim() == 1:
+            z = z.unsqueeze(0)
         if action is None:
-            action = torch.zeros(state.shape[0], self.config.d_action, device=state.device)
+            action = torch.zeros(z.shape[0], self.config.d_action, device=z.device)
+        elif action.dim() == 1:
+            action = action.unsqueeze(0)
+        return self.dynamics_model(z, action)
 
-        return self.dynamics(state, action)
+    def dynamics(self, h: torch.Tensor) -> torch.Tensor:
+        return h if h.dim() > 1 else h.unsqueeze(0)
 
-    def transition(
-        self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
-        input_: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """State transition with dynamics."""
-        return self.dynamics(state, action)
+    def sample_z(self, logits_or_repr: torch.Tensor, temperature: float = 1.0, sample: bool = True) -> torch.Tensor:
+        del temperature, sample
+        return logits_or_repr
 
-    def decode(self, state: torch.Tensor) -> None:
-        """No decoder in contrastive models."""
+    def decode(self, h: torch.Tensor, z: torch.Tensor) -> None:
+        del h, z
         return None
 
-    def predict_reward(
-        self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
-    ) -> None:
-        """Optional reward prediction (if trained with rewards)."""
+    def predict_reward(self, h: torch.Tensor, z: torch.Tensor) -> None:
+        del h, z
         return None
 
-    def actor_forward(
-        self,
-        state: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
-        """Optional policy (if trained with RL)."""
+    def actor_forward(self, h: torch.Tensor, z: torch.Tensor) -> None:
+        del h, z
         return None
 
-    def forward_contrastive(
-        self,
-        z1: torch.Tensor,
-        z2: torch.Tensor,
-        action: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass for contrastive learning.
-
-        Args:
-            z1: Current latent (online encoder)
-            z2: Next latent (momentum encoder)
-            action: Action taken
-
-        Returns:
-            Tuple of (predicted embedding, target embedding)
-        """
+    def forward_contrastive(self, z1: torch.Tensor, z2: torch.Tensor, action: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         proj1 = self.projector(z1)
         pred1 = self.predictor(proj1)
-
         with torch.no_grad():
             target = self.momentum_encoder(z2)
-
         return pred1, target
 
-    def sample_state(
-        self,
-        logits: torch.Tensor,
-        temperature: float = 1.0,
-        sample: bool = True,
-    ) -> torch.Tensor:
-        """Passthrough for continuous latents."""
-        return logits
-
-    def initial_state(
-        self,
-        batch_size: int = 1,
-        device: Optional[torch.device] = None,
-    ) -> torch.Tensor:
-        """Initialize starting state."""
+    def initial_state(self, batch_size: int = 1, device: Optional[torch.device] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         if device is None:
             device = self._device
-        return torch.zeros(batch_size, self.config.d_h, device=device)
+        h = torch.zeros(batch_size, self.config.d_h, device=device)
+        z = torch.zeros(batch_size, self.config.d_h, device=device)
+        return h, z
 
     def to(self, device: torch.device) -> "ContrastiveAdapter":
         super().to(device)
@@ -227,7 +152,7 @@ class ContrastiveAdapter(WorldModelAdapter):
         return self
 
 
-from world_model_lens.backends.registry import REGISTRY, register
+from world_model_lens.backends.registry import register
 from world_model_lens.core.types import WorldModelFamily
 
 register(
