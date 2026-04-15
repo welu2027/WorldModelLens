@@ -181,9 +181,7 @@ class HookedWorldModel:
         Returns:
             HookedWorldModel instance
         """
-        from world_model_lens.backends import BackendRegistry
-
-        registry = BackendRegistry()
+        from world_model_lens.backends import REGISTRY as registry
         adapter_cls = registry.get(backend)
         adapter = adapter_cls(config) if config else adapter_cls.from_checkpoint(path)
 
@@ -523,6 +521,20 @@ class HookedWorldModel:
                     cache,
                     names_filter,
                 )
+
+            # Check for optional target encoder (e.g. for I-JEPA/JEPA models)
+            if hasattr(self.adapter, "target_encode"):
+                target_encoding = self.adapter.target_encode(obs.unsqueeze(0))
+                if target_encoding is not None:
+                    target_encoding = target_encoding.squeeze(0)
+                    self._apply_and_cache(
+                        "target_encoding",
+                        t,
+                        target_encoding,
+                        HookContext(timestep=t, component="target_encoding", trajectory_so_far=states),
+                        cache,
+                        names_filter,
+                    )
 
             reward_pred = None
             if caps.has_reward_head:

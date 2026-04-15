@@ -1,7 +1,11 @@
 """Trajectory hub for managing trajectory datasets."""
 
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Sequence, cast
 from dataclasses import dataclass
+
+import os
+import pickle
+from pathlib import Path
 
 from world_model_lens.core import LatentTrajectory
 
@@ -84,43 +88,53 @@ class TrajectoryDataset:
             n_trajectories=len(self.trajectories),
             total_timesteps=sum(lengths),
             mean_length=sum(lengths) / len(lengths) if lengths else 0,
-            std_length=self._std(lengths),
+            std_length=self._std([float(l) for l in lengths]),
             mean_reward=sum(rewards) / len(rewards) if rewards else None,
             std_reward=self._std(rewards) if rewards else None,
         )
 
     @staticmethod
-    def _std(values: List[float]) -> float:
+    def _std(values: Sequence[float]) -> float:
         if not values:
             return 0.0
         mean = sum(values) / len(values)
         variance = sum((v - mean) ** 2 for v in values) / len(values)
-        return variance**0.5
+        return cast(float, variance**0.5)
+
+
 
 
 class TrajectoryHub:
-    """Hub for managing trajectory datasets.
+    """Local storage for trajectory datasets.
 
-    Example:
-        hub = TrajectoryHub()
-        hub.save(dataset, "my_trajectories")
-        loaded = hub.load("my_trajectories")
+    Datasets are saved as .pkl files in the local cache directory.
     """
 
-    _registry: Dict[str, TrajectoryDataset] = {}
+    def __init__(self, root_dir: str = "~/.cache/world_model_lens/trajectories") -> None:
+        """Initialize TrajectoryHub.
 
-    @classmethod
-    def save(cls, dataset: TrajectoryDataset, name: str) -> None:
+        Args:
+            root_dir: Root directory for storing trajectory datasets.
+        """
+        self.root_dir = Path(root_dir).expanduser()
+        self.root_dir.mkdir(parents=True, exist_ok=True)
+
+    def save(self, dataset: TrajectoryDataset, name: str) -> str:
         """Save a trajectory dataset to the hub.
 
         Args:
             dataset: TrajectoryDataset to save.
             name: Name to register under.
-        """
-        cls._registry[name] = dataset
 
-    @classmethod
-    def load(cls, name: str) -> TrajectoryDataset:
+        Returns:
+            Path where the dataset was saved.
+        """
+        path = self.root_dir / f"{name}.pkl"
+        with open(path, "wb") as f:
+            pickle.dump(dataset, f)
+        return str(path)
+
+    def load(self, name: str) -> TrajectoryDataset:
         """Load a saved trajectory dataset.
 
         Args:
@@ -130,19 +144,30 @@ class TrajectoryHub:
             TrajectoryDataset.
 
         Raises:
-            KeyError: If name not found.
+            FileNotFoundError: If name not found.
         """
-        if name not in cls._registry:
-            raise KeyError(f"No dataset named '{name}'. Available: {list(cls._registry.keys())}")
-        return cls._registry[name]
+        path = self.root_dir / f"{name}.pkl"
+        if not path.exists():
+            raise FileNotFoundError(f"No dataset named '{name}' found at {path}")
 
-    @classmethod
-    def list_saved(cls) -> List[str]:
-        """List all saved datasets."""
-        return list(cls._registry.keys())
+        with open(path, "rb") as f:
+            return cast(TrajectoryDataset, pickle.load(f))
 
-    @classmethod
-    def delete(cls, name: str) -> None:
-        """Delete a saved dataset."""
-        if name in cls._registry:
-            del cls._registry[name]
+    def list_saved(self) -> List[str]:
+        """List all saved dataset names."""
+        pkl_files = self.root_dir.glob("*.pkl")
+        return [f.stem for f in pkl_files]
+
+    def delete(self, name: str) -> None:
+        """Delete a saved dataset.
+
+        Args:
+            name: Name of the dataset to delete.
+
+        Raises:
+            FileNotFoundError: If dataset not found.
+        """
+        path = self.root_dir / f"{name}.pkl"
+        if not path.exists():
+            raise FileNotFoundError(f"No dataset named '{name}' found at {path}")
+        path.unlink()

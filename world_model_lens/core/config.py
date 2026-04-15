@@ -75,6 +75,7 @@ class WorldModelConfig:
         "autonomous_driving",
         "robotics",
         "contrastive_predictive",
+        "ijepa",
     ] = "dreamerv3"
     n_gru_layers: int = 1
     reward_head: Literal["twohot", "gaussian", "categorical"] = "twohot"
@@ -106,6 +107,11 @@ class WorldModelConfig:
     n_layers: int = 4
     n_heads: int = 4
     vocab_size: int = 512
+    
+    # I-JEPA specific
+    predictor_embed_dim: int = 384
+    predictor_depth: int = 4
+    predictor_heads: int = 6
 
     @property
     def d_z(self) -> int:
