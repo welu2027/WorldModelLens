@@ -6,7 +6,7 @@ from typing import Any
 import torch
 import torch.nn.functional as functional
 
-from .disentanglement import DisentanglementAnalyzer
+from world_model_lens.analysis.disentanglement import DisentanglementAnalyzer
 
 
 def _get_device() -> torch.device:
