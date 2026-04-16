@@ -701,6 +701,29 @@ result = analyzer.disentanglement_score(cache, factors=factors)
 print(f"MIG: {result.scores['MIG']:.3f}, DCI: {result.scores['DCI']:.3f}")
 ```
 
+### Unified Disentanglement Evaluation Suite
+
+For multi-component evaluation across `context_encoder`, `predictor`, `target_encoder`:
+
+```python
+from world_model_lens.analysis.metrics import DisentanglementEvaluationSuite
+
+suite = DisentanglementEvaluationSuite()
+result = suite.evaluate_components(
+    cache=cache,
+    factors=factors,
+    components=['context_encoder', 'predictor', 'target_encoder', 'z_posterior'],
+    metrics=['MIG', 'DCI', 'SAP']
+)
+
+# Per-component scores
+for comp, scores in result.component_results.items():
+    print(f"{comp} MIG: {scores['MIG']:.3f}")
+
+# Summary across all components
+print(f"Overall disentanglement: {result.summary_scores['DCI_disentanglement']:.3f}")
+```
+
 ---
 
 ## Contributing
