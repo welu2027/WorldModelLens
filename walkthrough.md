@@ -73,7 +73,7 @@ graph TD
 |-----------|------|-----------|
 | `core/` | Core data types & infrastructure | [latent_state.py](file:///d:/WorldModelLens/core/latent_state.py), [latent_trajectory.py](file:///d:/WorldModelLens/core/latent_trajectory.py), [config.py](file:///d:/WorldModelLens/core/config.py), [hooks.py](file:///d:/WorldModelLens/core/hooks.py), [activation_cache.py](file:///d:/WorldModelLens/core/activation_cache.py) |
 | `world_model_lens/` | **Main package** (pip-installable) | [__init__.py](file:///d:/WorldModelLens/sae/__init__.py), [hooked_world_model.py](file:///d:/WorldModelLens/hooked_world_model.py) |
-| `world_model_lens/backends/` | 24 model adapters | `generic_adapter.py`, `dreamerv3.py`, `iris.py`, `tdmpc2.py`, `video_world_model.py`, etc. |
+| `world_model_lens/backends/` | 24 model adapters | `base_adapter.py`, `dreamerv3.py`, `iris.py`, `tdmpc2.py`, `video_world_model.py`, etc. |
 | `world_model_lens/analysis/` | 14 analysis modules | `belief_analyzer.py`, `ood_detection.py`, `hallucination.py`, `disentanglement.py`, `uncertainty.py`, etc. |
 | `world_model_lens/patching/` | Activation patching & causal tracing | `patcher.py`, `causal_tracer.py`, `dim_patcher.py`, `sweep_result.py` |
 | `world_model_lens/probing/` | Linear probing & geometry | `prober.py`, `geometry.py`, `layer_prober.py`, `temporal_memory.py` |
@@ -168,7 +168,7 @@ This is the **main entry point** for all analysis. It wraps any backend adapter 
 
 ## Backend Adapter System
 
-### Abstract Base: [generic_adapter.py](file:///d:/WorldModelLens/world_model_lens/backends/generic_adapter.py)
+### Abstract Base: [base_adapter.py](file:///d:/WorldModelLens/world_model_lens/backends/base_adapter.py)
 
 All adapters implement two **required** methods:
 

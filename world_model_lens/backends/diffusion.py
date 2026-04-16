@@ -16,8 +16,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from dataclasses import dataclass
 
-from world_model_lens.backends.base_adapter import WorldModelAdapter
-from world_model_lens.core.config import WorldModelConfig
+from world_model_lens.backends.base_adapter import BaseModelAdapter, AdapterConfig
 from world_model_lens.core.types import (
     WorldModelMetadata,
     ModelPurpose,
@@ -241,7 +240,7 @@ class DiffusionDynamics(nn.Module):
         return x
 
 
-class DiffusionWorldModelAdapter(WorldModelAdapter):
+class DiffusionWorldModelAdapter(BaseModelAdapter):
     """Adapter for diffusion-based world models.
 
     This adapter supports world models that use diffusion for:
@@ -250,14 +249,14 @@ class DiffusionWorldModelAdapter(WorldModelAdapter):
     - State-space modeling
 
     Example:
-        config = WorldModelConfig(
+        config = AdapterConfig(
             model_purpose=ModelPurpose.VIDEO_PREDICTION,
             d_latent=256,
         )
         adapter = DiffusionWorldModelAdapter(config)
     """
 
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         super().__init__(config)
 
         self.config = config

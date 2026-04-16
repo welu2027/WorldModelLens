@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from world_model_lens import HookedWorldModel, WorldModelConfig
-from world_model_lens.backends.base_adapter import WorldModelAdapter, WorldModelCapabilities
+from world_model_lens.backends.base_adapter import BaseModelAdapter, WorldModelCapabilities
 
 
 def test_run_with_cache_returns_correct_length(hooked_wm, fake_obs_seq, fake_action_seq):
@@ -95,7 +95,7 @@ class LegacyAdapter(nn.Module):
         return logits_or_repr
 
 
-class CapabilitiesAdapter(WorldModelAdapter):
+class CapabilitiesAdapter(BaseModelAdapter):
     """New-style adapter with capabilities and (h, z, action) transition."""
 
     def __init__(self, config):
@@ -248,7 +248,7 @@ def test_imagine_samples_actions_from_policy():
         has_done_head=False,
     )
 
-    class PolicyAdapter(WorldModelAdapter):
+    class PolicyAdapter(BaseModelAdapter):
         def __init__(self, config):
             super().__init__(config)
             self._capabilities = WorldModelCapabilities(
@@ -312,7 +312,7 @@ def test_imagine_uses_provided_actions():
         has_done_head=False,
     )
 
-    class SimpleAdapter(WorldModelAdapter):
+    class SimpleAdapter(BaseModelAdapter):
         def __init__(self, config):
             super().__init__(config)
             self._capabilities = WorldModelCapabilities(
@@ -371,7 +371,7 @@ def test_transition_hook_applies():
         has_done_head=False,
     )
 
-    class SimpleAdapter(WorldModelAdapter):
+    class SimpleAdapter(BaseModelAdapter):
         def __init__(self, config):
             super().__init__(config)
             self._capabilities = WorldModelCapabilities(

@@ -32,7 +32,7 @@ from world_model_lens.backends.decision_transformer import DecisionTransformerAd
 from world_model_lens.backends.dreamerv1 import DreamerV1Adapter
 from world_model_lens.backends.dreamerv2 import DreamerV2Adapter
 from world_model_lens.backends.dreamerv3 import DreamerV3Adapter
-from world_model_lens.backends.generic_adapter import WorldModelAdapter
+from world_model_lens.backends.base_adapter import BaseModelAdapter
 from world_model_lens.backends.ha_schmidhuber import HaSchmidhuberWorldModelAdapter
 from world_model_lens.backends.iris import IRISAdapter
 from world_model_lens.backends.planet import PlaNetAdapter
@@ -96,7 +96,7 @@ __all__ = [
     "ModelPurpose",
     "WorldModelFamily",
     "ObservationModality",
-    "WorldModelAdapter",
+    "BaseModelAdapter",
     "BackendRegistry",
     "REGISTRY",
     "register",

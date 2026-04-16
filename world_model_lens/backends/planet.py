@@ -5,7 +5,7 @@ Reference: "PlaNet: Learning Latent Dynamics for Planning from Pixels" (Hafner e
 PlaNet was the predecessor to Dreamer and introduced:
 - Latent RSSM: recurrent state-space model with discrete latent variables
 - Planning at the latent level using model predictive control (MPC)
-- Learning from images without decoder (奖励 prediction only)
+- Learning from images without decoder (reward prediction only)
 
 Key differences from Dreamer:
 - No decoder (learns only from reward)
@@ -16,13 +16,12 @@ Key differences from Dreamer:
 This adapter implements the latent dynamics model from PlaNet.
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from world_model_lens.backends.generic_adapter import WorldModelAdapter, WorldModelConfig
-from world_model_lens.core.types import LatentType, DynamicsType, WorldModelFamily
+from world_model_lens.backends.base_adapter import BaseModelAdapter, AdapterConfig
+from world_model_lens.core.types import WorldModelFamily
 
 
 class PlaNetEncoder(nn.Module):
@@ -102,27 +101,15 @@ class PlaNetRewardPredictor(nn.Module):
         return self.fc(x)
 
 
-class PlaNetAdapter(WorldModelAdapter):
-    """Adapter for PlaNet (latent RSSM from pixels).
+class PlaNetAdapter(BaseModelAdapter):
+    """Adapter for PlaNet (latent RSSM from pixels)."""
 
-    PlaNet learns a latent dynamics model from images without
-    using a decoder. The model is used for planning/MPC at the
-    latent level.
-
-    Architecture:
-    - CNN encoder: images -> latent observation encoding
-    - RSSM: GRU for dynamics, discrete latent variables
-    - Reward predictor: (h, z) -> reward
-
-    This is the foundational architecture that Dreamer built upon.
-    """
-
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         super().__init__(config)
         self.config = config
 
         self.encoder = PlaNetEncoder(in_channels=3, hidden_dim=config.d_obs)
-        self.dynamics = PlaNetDynamics(config.d_h, config.d_z, config.d_action)
+        self.dynamics_model = PlaNetDynamics(config.d_h, config.d_z, config.d_action)
         self.posterior = PlaNetPosterior(config.d_obs, config.d_h, config.d_z)
         self.reward_predictor = PlaNetRewardPredictor(config.d_h, config.d_z)
 
@@ -143,155 +130,69 @@ class PlaNetAdapter(WorldModelAdapter):
     def world_model_family(self) -> WorldModelFamily:
         return WorldModelFamily.PLA_NET
 
+    def _sample_posterior(self, posterior_params: torch.Tensor) -> torch.Tensor:
+        """Sample a concrete latent from posterior mean/log-scale parameters."""
+        mean, log_std = posterior_params.chunk(2, dim=-1)
+        std = log_std.clamp(-5, 2).exp()
+        return mean + torch.randn_like(std) * std
+
     def encode(
         self,
-        observation: torch.Tensor,
-        context: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Encode observation to posterior latent.
+        obs: torch.Tensor,
+        h_prev: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Encode observation to a concrete posterior latent."""
+        if obs.dim() == 3:
+            obs = obs.unsqueeze(0)
 
-        Args:
-            observation: Image tensor [..., C, H, W]
-            context: Optional hidden state h
+        obs_encoding = self.encoder(obs)
 
-        Returns:
-            Tuple of (posterior logits, observation encoding)
-        """
-        if observation.dim() == 3:
-            observation = observation.unsqueeze(0)
-        if observation.dim() == 4:
-            observation = observation.unsqueeze(0)
+        h = h_prev
+        if h.dim() == 1:
+            h = h.unsqueeze(0)
+        if h.shape[0] != obs.shape[0]:
+            h = torch.zeros(obs.shape[0], self.config.d_h, device=obs.device)
 
-        obs_encoding = self.encoder(observation)
-
-        h = torch.zeros(observation.shape[0], self.config.d_h, device=observation.device)
-        if context is not None and context.dim() == 2:
-            h = context
-
-        posterior_logits = self.posterior(obs_encoding, h)
-
-        return posterior_logits, obs_encoding
-
-    def dynamics(
-        self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Compute prior from hidden state (no observation).
-
-        Args:
-            state: Current state tuple (h, z) or just h
-            action: Optional action
-
-        Returns:
-            Prior logits for next z
-        """
-        if isinstance(state, tuple):
-            h, z = state
-        else:
-            h = state
-            z = torch.zeros(h.shape[0], self.config.d_z, device=h.device)
-
-        if action is None:
-            action = torch.zeros(h.shape[0], self.config.d_action, device=h.device)
-
-        h_next, prior_logits = self.dynamics(h, z, action)
-        return prior_logits
+        posterior_params = self.posterior(obs_encoding, h)
+        z_post = self._sample_posterior(posterior_params)
+        return z_post, obs_encoding
 
     def transition(
         self,
-        state: torch.Tensor,
+        h: torch.Tensor,
+        z: torch.Tensor,
         action: Optional[torch.Tensor] = None,
-        input_: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Full transition with posterior.
-
-        Args:
-            state: Current state (h, z)
-            action: Action taken
-            input_: Optional observation for posterior
-
-        Returns:
-            Next hidden state
-        """
-        if isinstance(state, tuple):
-            h, z = state
-        else:
-            h = state
-            z = torch.zeros(h.shape[0], self.config.d_z, device=h.device)
-
+        """Transition hidden state using latent and action."""
         if action is None:
             action = torch.zeros(h.shape[0], self.config.d_action, device=h.device)
 
-        h_next, _ = self.dynamics(h, z, action)
+        h_next, _ = self.dynamics_model(h, z, action)
         return h_next
 
     def predict_reward(
         self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
+        h: torch.Tensor,
+        z: torch.Tensor,
     ) -> Optional[torch.Tensor]:
-        """Predict reward from state.
-
-        Args:
-            state: State (h, z) tuple or h
-            action: Optional action
-
-        Returns:
-            Reward prediction
-        """
-        if isinstance(state, tuple):
-            h, z = state
-        else:
-            h = state
-            z = torch.zeros(h.shape[0], self.config.d_z, device=h.device)
-
+        """Predict reward from latent state."""
         return self.reward_predictor(h, z)
 
-    def decode(self, state: torch.Tensor) -> None:
+    def decode(self, h: torch.Tensor, z: torch.Tensor) -> None:
         """PlaNet has no decoder."""
+        del h, z
         return None
-
-    def sample_state(
-        self,
-        logits: torch.Tensor,
-        temperature: float = 1.0,
-        sample: bool = True,
-    ) -> torch.Tensor:
-        """Sample from categorical distribution."""
-        if not self.config.is_discrete:
-            return logits
-
-        if not sample:
-            indices = logits.argmax(dim=-1)
-            return F.one_hot(indices, num_classes=logits.shape[-1]).float()
-
-        gumbels = torch.rand_like(logits).log().neg()
-        gumbels = (logits + gumbels) / temperature
-        soft = F.softmax(gumbels, dim=-1)
-        indices = soft.argmax(dim=-1)
-        hard = F.one_hot(indices, num_classes=logits.shape[-1]).float()
-        return (hard - soft).detach() + soft
 
     def initial_state(
         self,
         batch_size: int = 1,
         device: Optional[torch.device] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Initialize starting state.
-
-        Args:
-            batch_size: Number of initial states
-            device: Optional device
-
-        Returns:
-            Tuple of (h, z)
-        """
+        """Initialize starting state."""
         if device is None:
             device = self._device
         h = torch.zeros(batch_size, self.config.d_h, device=device)
-        z_logits = torch.zeros(batch_size, self.config.d_z, device=device)
-        z = self.sample_state(z_logits, temperature=1.0)
+        z = torch.zeros(batch_size, self.config.d_z, device=device)
         return h, z
 
     def to(self, device: torch.device) -> "PlaNetAdapter":
@@ -308,7 +209,7 @@ class PlaNetAdapter(WorldModelAdapter):
         return self
 
 
-from world_model_lens.backends.registry import REGISTRY, register
+from world_model_lens.backends.registry import register
 from world_model_lens.core.types import WorldModelFamily
 
 register(

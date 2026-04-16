@@ -54,7 +54,7 @@ make coverage
 ## Adding a New Backend
 
 1. Create a new file in `world_model_lens/backends/`
-2. Implement the `WorldModelAdapter` interface
+2. Implement the `BaseModelAdapter` interface
 3. Register in `backends/__init__.py`
 4. Add to `backends/registry.py`
 5. Add tests in `tests/`

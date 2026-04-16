@@ -16,7 +16,7 @@ Other:
 - PlanningAdapter: Planning-based world models
 """
 
-from world_model_lens.backends.generic_adapter import WorldModelAdapter
+from world_model_lens.backends.base_adapter import BaseModelAdapter
 from world_model_lens.backends.registry import BackendRegistry, REGISTRY
 from world_model_lens.core.types import WorldModelFamily
 
@@ -56,7 +56,7 @@ REGISTRY.register(
 )
 
 __all__ = [
-    "WorldModelAdapter",
+    "BaseModelAdapter",
     "DreamerV3Adapter",
     "DreamerV2Adapter",
     "IRISAdapter",

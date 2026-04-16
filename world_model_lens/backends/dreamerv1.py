@@ -17,13 +17,12 @@ Key differences from DreamerV2/V3:
 - Lower compute requirements
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from world_model_lens.backends.generic_adapter import WorldModelAdapter, WorldModelConfig
-from world_model_lens.core.types import LatentType, DynamicsType, WorldModelFamily
+from world_model_lens.backends.base_adapter import BaseModelAdapter, AdapterConfig
+from world_model_lens.core.types import WorldModelFamily
 
 
 class DreamerV1Encoder(nn.Module):
@@ -73,7 +72,7 @@ class DreamerV1Decoder(nn.Module):
 
 
 class DreamerV1Dynamics(nn.Module):
-    """DreamerV1 RSSM dynamics ( GRU + prior)."""
+    """DreamerV1 RSSM dynamics (GRU + prior)."""
 
     def __init__(self, d_z: int, d_action: int, d_h: int):
         super().__init__()
@@ -164,7 +163,7 @@ class DreamerV1Actor(nn.Module):
         return self.fc(x)
 
 
-class DreamerV1Adapter(WorldModelAdapter):
+class DreamerV1Adapter(BaseModelAdapter):
     """Adapter for DreamerV1.
 
     The original Dreamer algorithm with:
@@ -175,13 +174,13 @@ class DreamerV1Adapter(WorldModelAdapter):
     - ELU activations
     """
 
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         super().__init__(config)
         self.config = config
 
         self.encoder = DreamerV1Encoder(in_channels=3, hidden_dim=config.d_obs)
         self.decoder = DreamerV1Decoder(hidden_dim=config.d_h + config.d_z, out_channels=3)
-        self.dynamics = DreamerV1Dynamics(config.d_z, config.d_action, config.d_h)
+        self.dynamics_model = DreamerV1Dynamics(config.d_z, config.d_action, config.d_h)
         self.posterior = DreamerV1Posterior(config.d_obs, config.d_h, config.d_z)
         self.reward_head = DreamerV1RewardHead(config.d_h, config.d_z)
         self.value_head = DreamerV1ValueHead(config.d_h, config.d_z)
@@ -208,135 +207,74 @@ class DreamerV1Adapter(WorldModelAdapter):
     def world_model_family(self) -> WorldModelFamily:
         return WorldModelFamily.DREAMER
 
+    def _sample_posterior(self, posterior_params: torch.Tensor) -> torch.Tensor:
+        """Sample a concrete latent from posterior mean/log-scale parameters."""
+        mean, log_std = posterior_params.chunk(2, dim=-1)
+        std = log_std.clamp(-5, 2).exp()
+        return mean + torch.randn_like(std) * std
+
     def encode(
         self,
-        observation: torch.Tensor,
-        context: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Encode observation to posterior."""
-        if observation.dim() == 3:
-            observation = observation.unsqueeze(0)
-        if observation.dim() == 4:
-            observation = observation.unsqueeze(0)
+        obs: torch.Tensor,
+        h_prev: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Encode observation to a concrete posterior latent."""
+        if obs.dim() == 3:
+            obs = obs.unsqueeze(0)
 
-        obs_encoding = self.encoder(observation)
+        obs_encoding = self.encoder(obs)
 
-        h = torch.zeros(observation.shape[0], self.config.d_h, device=observation.device)
-        if context is not None and context.dim() == 2:
-            h = context
+        h = h_prev
+        if h.dim() == 1:
+            h = h.unsqueeze(0)
+        if h.shape[0] != obs.shape[0]:
+            h = torch.zeros(obs.shape[0], self.config.d_h, device=obs.device)
 
-        posterior_logits = self.posterior(obs_encoding, h)
-        return posterior_logits, obs_encoding
-
-    def dynamics(
-        self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Compute prior from hidden state."""
-        if isinstance(state, tuple):
-            h, z = state
-        else:
-            h = state
-            z = torch.zeros(h.shape[0], self.config.d_z, device=h.device)
-
-        if action is None:
-            action = torch.zeros(h.shape[0], self.config.d_action, device=h.device)
-
-        h_next, prior_logits = self.dynamics(h, z, action)
-        return prior_logits
+        posterior_params = self.posterior(obs_encoding, h)
+        z_post = self._sample_posterior(posterior_params)
+        return z_post, obs_encoding
 
     def transition(
         self,
-        state: torch.Tensor,
+        h: torch.Tensor,
+        z: torch.Tensor,
         action: Optional[torch.Tensor] = None,
-        input_: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Full transition."""
-        if isinstance(state, tuple):
-            h, z = state
-        else:
-            h = state
-            z = torch.zeros(h.shape[0], self.config.d_z, device=h.device)
-
+        """Transition hidden state using latent and action."""
         if action is None:
             action = torch.zeros(h.shape[0], self.config.d_action, device=h.device)
 
-        h_next, _ = self.dynamics(h, z, action)
+        h_next, _ = self.dynamics_model(h, z, action)
         return h_next
 
-    def decode(self, state: torch.Tensor) -> Optional[torch.Tensor]:
+    def decode(self, h: torch.Tensor, z: torch.Tensor) -> Optional[torch.Tensor]:
         """Decode state to observation."""
-        if isinstance(state, tuple):
-            h, z = state
-        else:
-            h = state
-            z = torch.zeros(h.shape[0], self.config.d_z, device=h.device)
-
         x = torch.cat([h, z], dim=-1)
         return self.decoder(x)
 
     def predict_reward(
         self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
+        h: torch.Tensor,
+        z: torch.Tensor,
     ) -> Optional[torch.Tensor]:
         """Predict reward."""
-        if isinstance(state, tuple):
-            h, z = state
-        else:
-            h = state
-            z = torch.zeros(h.shape[0], self.config.d_z, device=h.device)
-
         return self.reward_head(h, z)
 
-    def predict_value(
+    def critic_forward(
         self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
+        h: torch.Tensor,
+        z: torch.Tensor,
     ) -> Optional[torch.Tensor]:
         """Predict value."""
-        if isinstance(state, tuple):
-            h, z = state
-        else:
-            h = state
-            z = torch.zeros(h.shape[0], self.config.d_z, device=h.device)
-
         return self.value_head(h, z)
 
     def actor_forward(
         self,
-        state: torch.Tensor,
+        h: torch.Tensor,
+        z: torch.Tensor,
     ) -> Optional[torch.Tensor]:
         """Predict action."""
-        if isinstance(state, tuple):
-            h, z = state
-        else:
-            h = state
-            z = torch.zeros(h.shape[0], self.config.d_z, device=h.device)
-
         return self.actor(h, z)
-
-    def sample_state(
-        self,
-        logits: torch.Tensor,
-        temperature: float = 1.0,
-        sample: bool = True,
-    ) -> torch.Tensor:
-        """Sample from categorical distribution."""
-        if not self.config.is_discrete:
-            return logits
-
-        if not sample:
-            indices = logits.argmax(dim=-1)
-            return F.one_hot(indices, num_classes=logits.shape[-1]).float()
-
-        gumbels = torch.rand_like(logits).log().neg()
-        gumbels = (logits + gumbels) / temperature
-        soft = F.softmax(gumbels, dim=-1)
-        indices = soft.argmax(dim=-1)
-        hard = F.one_hot(indices, num_classes=logits.shape[-1]).float()
-        return (hard - soft).detach() + soft
 
     def initial_state(
         self,
@@ -347,8 +285,7 @@ class DreamerV1Adapter(WorldModelAdapter):
         if device is None:
             device = self._device
         h = torch.zeros(batch_size, self.config.d_h, device=device)
-        z_logits = torch.zeros(batch_size, self.config.d_z, device=device)
-        z = self.sample_state(z_logits, temperature=1.0)
+        z = torch.zeros(batch_size, self.config.d_z, device=device)
         return h, z
 
     def to(self, device: torch.device) -> "DreamerV1Adapter":
@@ -365,7 +302,7 @@ class DreamerV1Adapter(WorldModelAdapter):
         return self
 
 
-from world_model_lens.backends.registry import REGISTRY, register
+from world_model_lens.backends.registry import register
 from world_model_lens.core.types import WorldModelFamily
 
 register(

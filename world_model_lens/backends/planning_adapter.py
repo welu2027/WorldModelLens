@@ -6,14 +6,14 @@ Planning models predict action sequences to achieve goals.
 They fit the "encode + dynamics + plan" pattern.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 
-from world_model_lens.backends.generic_adapter import WorldModelAdapter, WorldModelConfig
+from world_model_lens.backends.base_adapter import BaseModelAdapter, AdapterConfig
 
 
-class PlanningAdapter(WorldModelAdapter):
+class PlanningAdapter(BaseModelAdapter):
     """World model adapter for planning-oriented models.
 
     This model:
@@ -25,7 +25,7 @@ class PlanningAdapter(WorldModelAdapter):
     No reward or value predictions - planning is goal-based.
     """
 
-    def __init__(self, config: WorldModelConfig, goal_dim: int = 32):
+    def __init__(self, config: AdapterConfig, goal_dim: int = 32):
         super().__init__(config)
         self.goal_dim = goal_dim
 
@@ -35,7 +35,7 @@ class PlanningAdapter(WorldModelAdapter):
             nn.Linear(256, config.d_state),
         )
 
-        self.dynamics = nn.Sequential(
+        self.transition_model = nn.Sequential(
             nn.Linear(config.d_state + config.d_action, 256),
             nn.ReLU(),
             nn.Linear(256, config.d_state),
@@ -47,32 +47,81 @@ class PlanningAdapter(WorldModelAdapter):
             nn.Linear(256, config.d_action * 10),
         )
 
+        self.goal_achievement_head = nn.Sequential(
+            nn.Linear(config.d_state + goal_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1),
+        )
+
+    def _goal_from_h(
+        self,
+        h: Optional[torch.Tensor],
+        batch_size: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Project hidden state onto the goal-conditioning space."""
+        if h is None:
+            return torch.zeros(batch_size, self.goal_dim, device=device)
+
+        if h.dim() == 1:
+            h = h.unsqueeze(0)
+
+        if h.shape[-1] == self.goal_dim:
+            return h
+
+        if h.shape[-1] > self.goal_dim:
+            return h[..., : self.goal_dim]
+
+        pad = self.goal_dim - h.shape[-1]
+        return torch.nn.functional.pad(h, (0, pad))
+
     def encode(
         self,
-        observation: torch.Tensor,
-        context: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Encode observation + goal into state."""
-        if observation.dim() == 4:
-            obs_flat = observation.flatten(1) if observation.shape[0] == 1 else observation
-        else:
-            obs_flat = observation
+        obs: torch.Tensor,
+        h_prev: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Encode observation plus goal context into the planning latent."""
+        if obs.dim() > 2:
+            obs = obs.flatten(1)
+        elif obs.dim() == 1:
+            obs = obs.unsqueeze(0)
 
-        goal = (
-            context
-            if context is not None
-            else torch.zeros(1, self.goal_dim, device=obs_flat.device)
-        )
-        x = torch.cat([obs_flat, goal], dim=-1)
-        state = self.encoder(x)
-        return state, state
+        goal = self._goal_from_h(h_prev, obs.shape[0], obs.device)
+        x = torch.cat([obs, goal], dim=-1)
+        z = self.encoder(x)
+        return z, z
 
-    def dynamics(self, state: torch.Tensor, action: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """Predict next state given current state and action."""
+    def transition(
+        self,
+        h: torch.Tensor,
+        z: torch.Tensor,
+        action: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Predict next planning state.
+
+        This adapter is effectively single-state internally, so `z` is treated
+        as the current planning state and the returned hidden state is the next
+        planning state.
+        """
+        del h
         if action is None:
-            action = torch.zeros(state.shape[0], self.config.d_action, device=state.device)
-        x = torch.cat([state, action], dim=-1)
-        return self.dynamics(x)
+            action = torch.zeros(z.shape[0], self.config.d_action, device=z.device)
+        x = torch.cat([z, action], dim=-1)
+        return self.transition_model(x)
+
+    def dynamics(self, h: torch.Tensor) -> torch.Tensor:
+        """Planning adapter uses the hidden state itself as the next latent prior."""
+        return h if h.dim() > 1 else h.unsqueeze(0)
+
+    def sample_z(
+        self,
+        logits_or_repr: torch.Tensor,
+        temperature: float = 1.0,
+        sample: bool = True,
+    ) -> torch.Tensor:
+        """Planning latents are continuous representations, not categorical logits."""
+        del temperature, sample
+        return logits_or_repr
 
     def plan(
         self,
@@ -94,6 +143,16 @@ class PlanningAdapter(WorldModelAdapter):
         action_sequence = self.planner(x)
         return action_sequence.view(-1, horizon, self.config.d_action)
 
+    def actor_forward(
+        self,
+        h: torch.Tensor,
+        z: torch.Tensor,
+    ) -> torch.Tensor:
+        """Return the first action from the planned action sequence."""
+        goal = self._goal_from_h(h, z.shape[0], z.device)
+        planned_actions = self.plan(z, goal)
+        return planned_actions[:, 0]
+
     def predict_goal_achievement(
         self,
         state: torch.Tensor,
@@ -101,4 +160,4 @@ class PlanningAdapter(WorldModelAdapter):
     ) -> torch.Tensor:
         """Predict whether goal is achieved."""
         x = torch.cat([state, goal], dim=-1)
-        return torch.sigmoid(self.planner[2](self.planner[1](self.planner[0](x)[:, :1])))
+        return torch.sigmoid(self.goal_achievement_head(x))

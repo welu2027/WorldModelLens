@@ -12,20 +12,20 @@ This adapter supports both the original MDN-RNN dynamics and can
 be extended to work with modern variants.
 
 Key characteristics:
-- Discrete VAE latent (categorical)
+- Continuous VAE latent
 - MDN outputs mixture of Gaussians for next latent
 - Simple controller: linear(z, h) -> action
 - No built-in reward prediction (used with external reward)
 - Non-RL by default: can be extended for RL use
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from world_model_lens.backends.generic_adapter import WorldModelAdapter, WorldModelConfig
-from world_model_lens.core.types import LatentType, DynamicsType, WorldModelFamily
+from world_model_lens.backends.base_adapter import BaseModelAdapter, AdapterConfig
+from world_model_lens.core.types import WorldModelFamily
 
 
 class VAEEncoder(nn.Module):
@@ -111,12 +111,13 @@ class MDNRNN(nn.Module):
 
         h_next = self.rnn(x, h)
 
+        batch_size = h_next.shape[0]
         mdn_output = self.mdn_fc(h_next)
-        mdn_output = mdn_output.view(-1, self.n_mixtures, 3)
+        mdn_output = mdn_output.view(batch_size, self.latent_dim, self.n_mixtures, 3)
 
-        pi = F.softmax(mdn_output[:, :, 0], dim=1)
-        mu = mdn_output[:, :, 1]
-        log_sigma = mdn_output[:, :, 2]
+        pi = F.softmax(mdn_output[..., 0], dim=-1)
+        mu = mdn_output[..., 1]
+        log_sigma = mdn_output[..., 2]
 
         return h_next, pi, mu, log_sigma
 
@@ -126,12 +127,12 @@ class MDNRNN(nn.Module):
         mu: torch.Tensor,
         log_sigma: torch.Tensor,
     ) -> torch.Tensor:
-        B, M = pi.shape
-        pi_idx = torch.multinomial(pi, 1).squeeze(-1)
-        mu_selected = mu.gather(1, pi_idx.unsqueeze(-1)).squeeze(-1)
-        sigma = log_sigma.exp().gather(1, pi_idx.unsqueeze(-1)).squeeze(-1)
-        z = mu_selected + torch.randn_like(mu_selected) * sigma
-        return z
+        batch_size, latent_dim, n_mixtures = pi.shape
+        mixture_indices = torch.multinomial(pi.reshape(-1, n_mixtures), 1).view(batch_size, latent_dim)
+        gather_index = mixture_indices.unsqueeze(-1)
+        mu_selected = mu.gather(-1, gather_index).squeeze(-1)
+        sigma_selected = log_sigma.exp().gather(-1, gather_index).squeeze(-1)
+        return mu_selected + torch.randn_like(mu_selected) * sigma_selected
 
 
 class SimpleController(nn.Module):
@@ -149,25 +150,14 @@ class SimpleController(nn.Module):
         return self.fc(x)
 
 
-class HaSchmidhuberWorldModelAdapter(WorldModelAdapter):
-    """Adapter for Ha & Schmidhuber "World Models" (VAE + MDN-RNN + Controller).
+class HaSchmidhuberWorldModelAdapter(BaseModelAdapter):
+    """Adapter for Ha & Schmidhuber "World Models" (VAE + MDN-RNN + Controller)."""
 
-    Architecture:
-    - VAE: Compresses images to latent representation
-    - MDN-RNN: Predicts next latent (mixture of Gaussians)
-    - Controller: Simple linear layer for action selection
-
-    This adapter provides the core world model interface. The controller
-    can be used for policy extraction in simple environments.
-
-    For RL use, reward prediction can be added as an extension.
-    """
-
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         super().__init__(config)
         self.config = config
 
-        latent_dim = config.d_h
+        latent_dim = config.d_z
         hidden_dim = config.d_h
         action_dim = config.d_action
         n_mixtures = 5
@@ -196,141 +186,87 @@ class HaSchmidhuberWorldModelAdapter(WorldModelAdapter):
 
     def encode(
         self,
-        observation: torch.Tensor,
-        context: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Encode observation to VAE latent.
+        obs: torch.Tensor,
+        h_prev: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Encode observation to a VAE latent."""
+        del h_prev
+        if obs.dim() == 3:
+            obs = obs.unsqueeze(0)
 
-        Args:
-            observation: Image tensor [..., C, H, W]
-            context: Optional hidden state for VAE
-
-        Returns:
-            Tuple of (latent, observation_encoding)
-        """
-        if observation.dim() == 3:
-            observation = observation.unsqueeze(0)
-        if observation.dim() == 4:
-            observation = observation.unsqueeze(0)
-
-        mean, logvar = self.vae_encoder(observation)
-        std = (logvar * 0.5).exp()
+        mean, logvar = self.vae_encoder(obs)
+        std = (0.5 * logvar).exp()
         z = mean + std * torch.randn_like(std)
-
         return z, mean
-
-    def dynamics(
-        self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """MDN-RNN prior prediction (without observation).
-
-        Args:
-            state: Current latent state
-            action: Optional action
-
-        Returns:
-            Prior latent (mean of mixture)
-        """
-        if state.dim() == 1:
-            state = state.unsqueeze(0)
-        if action is not None and action.dim() == 1:
-            action = action.unsqueeze(0)
-
-        B = state.shape[0]
-        h = torch.zeros(B, self.config.d_h, device=state.device)
-
-        h_next, pi, mu, log_sigma = self.mdn_rnn(state, h, action)
-
-        z_next = self.mdn_rnn.sample_next_z(pi, mu, log_sigma)
-        return z_next
 
     def transition(
         self,
-        state: torch.Tensor,
+        h: torch.Tensor,
+        z: torch.Tensor,
         action: Optional[torch.Tensor] = None,
-        input_: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Full transition with MDN-RNN.
+        """Advance the MDN-RNN hidden state."""
+        if z.dim() == 1:
+            z = z.unsqueeze(0)
+        if h.dim() == 1:
+            h = h.unsqueeze(0)
+        if action is not None and action.dim() == 1:
+            action = action.unsqueeze(0)
 
-        Args:
-            state: Current latent state [B, d_latent]
-            action: Action taken [B, d_action]
-            input_: Optional additional input
+        if action is None:
+            action = torch.zeros(z.shape[0], self.config.d_action, device=z.device)
 
-        Returns:
-            Next latent state
-        """
-        B = state.shape[0]
-        h = torch.zeros(B, self.config.d_h, device=state.device)
+        h_next, _, _, _ = self.mdn_rnn(z, h, action)
+        return h_next
 
-        h_next, pi, mu, log_sigma = self.mdn_rnn(state, h, action)
-        z_next = self.mdn_rnn.sample_next_z(pi, mu, log_sigma)
+    def dynamics(self, h: torch.Tensor) -> torch.Tensor:
+        """Sample the next latent prior from the MDN parameters predicted from h."""
+        if h.dim() == 1:
+            h = h.unsqueeze(0)
+        batch_size = h.shape[0]
+        mdn_output = self.mdn_rnn.mdn_fc(h)
+        mdn_output = mdn_output.view(batch_size, self.config.d_z, self.mdn_rnn.n_mixtures, 3)
+        pi = F.softmax(mdn_output[..., 0], dim=-1)
+        mu = mdn_output[..., 1]
+        log_sigma = mdn_output[..., 2]
+        return self.mdn_rnn.sample_next_z(pi, mu, log_sigma)
 
-        return z_next
+    def sample_z(
+        self,
+        logits_or_repr: torch.Tensor,
+        temperature: float = 1.0,
+        sample: bool = True,
+    ) -> torch.Tensor:
+        """Ha/Schmidhuber uses continuous VAE latents, so priors pass through directly."""
+        del temperature, sample
+        return logits_or_repr
 
-    def decode(self, state: torch.Tensor) -> Optional[torch.Tensor]:
-        """Decode latent to observation (VAE decoder).
+    def decode(self, h: torch.Tensor, z: torch.Tensor) -> Optional[torch.Tensor]:
+        """Decode latent to observation with the VAE decoder."""
+        del h
+        if z.dim() == 1:
+            z = z.unsqueeze(0)
+        return self.vae_decoder(z)
 
-        Args:
-            state: Latent state
-
-        Returns:
-            Reconstructed observation
-        """
-        if state.dim() == 1:
-            state = state.unsqueeze(0)
-        return self.vae_decoder(state)
-
-    def actor_forward(self, state: torch.Tensor) -> Optional[torch.Tensor]:
-        """Controller forward: (z, h) -> action.
-
-        Args:
-            state: Current state (z)
-
-        Returns:
-            Action logits
-        """
-        if state.dim() == 1:
-            state = state.unsqueeze(0)
-
-        B = state.shape[0]
-        h = torch.zeros(B, self.config.d_h, device=state.device)
-
-        return self.controller(state, h)
+    def actor_forward(self, h: torch.Tensor, z: torch.Tensor) -> Optional[torch.Tensor]:
+        """Controller forward: (z, h) -> action."""
+        if z.dim() == 1:
+            z = z.unsqueeze(0)
+        if h.dim() == 1:
+            h = h.unsqueeze(0)
+        return self.controller(z, h)
 
     def initial_state(
         self,
         batch_size: int = 1,
         device: Optional[torch.device] = None,
-    ) -> torch.Tensor:
-        """Initialize starting state.
-
-        Args:
-            batch_size: Number of initial states
-            device: Optional device
-
-        Returns:
-            Initial latent state
-        """
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Initialize hidden and latent state."""
         if device is None:
             device = self._device
-        return torch.zeros(batch_size, self.config.d_h, device=device)
-
-    def sample_state(
-        self,
-        logits: torch.Tensor,
-        temperature: float = 1.0,
-        sample: bool = True,
-    ) -> torch.Tensor:
-        """Sample from latent distribution.
-
-        For continuous latents (VAE), just returns the sample.
-        """
-        if not sample:
-            return logits
-        return logits + torch.randn_like(logits) * 0.1
+        h = torch.zeros(batch_size, self.config.d_h, device=device)
+        z = torch.zeros(batch_size, self.config.d_z, device=device)
+        return h, z
 
     def to(self, device: torch.device) -> "HaSchmidhuberWorldModelAdapter":
         super().to(device)
@@ -346,7 +282,7 @@ class HaSchmidhuberWorldModelAdapter(WorldModelAdapter):
         return self
 
 
-from world_model_lens.backends.registry import REGISTRY, register
+from world_model_lens.backends.registry import register
 from world_model_lens.core.types import WorldModelFamily
 
 register(

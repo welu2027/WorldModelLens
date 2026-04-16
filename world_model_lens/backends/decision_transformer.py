@@ -15,13 +15,12 @@ Key characteristics:
 - Can be used as world model by predicting state tokens
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from world_model_lens.backends.generic_adapter import WorldModelAdapter, WorldModelConfig
-from world_model_lens.core.types import LatentType, DynamicsType, WorldModelFamily
+from world_model_lens.backends.base_adapter import BaseModelAdapter, AdapterConfig
+from world_model_lens.core.types import WorldModelFamily
 
 
 class DecisionTransformerEmbedding(nn.Module):
@@ -47,8 +46,6 @@ class DecisionTransformerEmbedding(nn.Module):
         returns_to_go: torch.Tensor,
         timesteps: torch.Tensor,
     ) -> torch.Tensor:
-        B, T, _ = states.shape
-
         state_emb = self.state_embedding(states)
         action_emb = self.action_embedding(actions)
         return_emb = self.return_embedding(returns_to_go.unsqueeze(-1))
@@ -126,7 +123,7 @@ class DecisionTransformer(nn.Module):
         return action_logits, state_predictions
 
 
-class DecisionTransformerAdapter(WorldModelAdapter):
+class DecisionTransformerAdapter(BaseModelAdapter):
     """Adapter for Decision Transformer.
 
     Transformer-based RL that treats trajectory as a sequence.
@@ -139,15 +136,16 @@ class DecisionTransformerAdapter(WorldModelAdapter):
     - Can predict future states for world modeling
     """
 
-    def __init__(self, config: WorldModelConfig):
+    def __init__(self, config: AdapterConfig):
         super().__init__(config)
         self.config = config
+        self.state_dim = config.d_obs
 
         self.transformer = DecisionTransformer(
             d_model=config.d_embed,
             n_layers=config.n_layers,
             n_head=config.n_heads,
-            state_dim=config.d_obs,
+            state_dim=self.state_dim,
             action_dim=config.d_action,
             max_len=config.imagination_horizon,
         )
@@ -166,106 +164,108 @@ class DecisionTransformerAdapter(WorldModelAdapter):
     def world_model_family(self) -> WorldModelFamily:
         return WorldModelFamily.DECISION_TRANSFORMER
 
-    def encode(
-        self,
-        observation: torch.Tensor,
-        context: Optional[torch.Tensor] = None,
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Encode observation to latent.
-
-        For DT, we use the observation directly as embedding.
-        """
-        if observation.dim() == 1:
-            observation = observation.unsqueeze(0)
-
-        obs_encoding = self.transformer.state_embedding(observation)
-        return obs_encoding.unsqueeze(0), obs_encoding
-
-    def dynamics(
-        self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Predict next state (world model mode).
-
-        In DT used as world model, we predict the next state
-        given current state and action.
-        """
-        B = state.shape[0] if state.dim() > 1 else 1
-        T = 1
-
+    def _normalize_state(self, state: torch.Tensor) -> torch.Tensor:
+        """Normalize a state tensor to [B, T, d_obs] for DT forward passes."""
+        if state.dim() > 2:
+            state = state.flatten(start_dim=1)
         if state.dim() == 1:
-            state = state.unsqueeze(0).unsqueeze(0)
+            state = state.unsqueeze(0)
         if state.dim() == 2:
             state = state.unsqueeze(1)
+        return state
 
-        if action is None:
-            action = torch.zeros(B, 1, self.config.d_action, device=state.device)
-
-        returns = torch.zeros(B, 1, device=state.device)
-        timesteps = torch.arange(T, device=state.device).unsqueeze(0).expand(B, -1)
-
-        _, state_preds = self.transformer(state, action, returns, timesteps)
-        return state_preds[:, -1]
+    def encode(
+        self,
+        obs: torch.Tensor,
+        h_prev: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Use the raw observation-space state as the DT latent/state carrier."""
+        del h_prev
+        if obs.dim() > 2:
+            obs = obs.flatten(start_dim=1)
+        elif obs.dim() == 1:
+            obs = obs.unsqueeze(0)
+        return obs, obs
 
     def transition(
         self,
-        state: torch.Tensor,
+        h: torch.Tensor,
+        z: torch.Tensor,
         action: Optional[torch.Tensor] = None,
-        input_: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """State transition."""
-        return self.dynamics(state, action)
+        """Predict the next state representation in observation space."""
+        del h
+        z = self._normalize_state(z)
+        batch_size = z.shape[0]
 
-    def decode(self, state: torch.Tensor) -> None:
+        if action is None:
+            action = torch.zeros(batch_size, 1, self.config.d_action, device=z.device)
+        elif action.dim() == 1:
+            action = action.unsqueeze(0).unsqueeze(0)
+        elif action.dim() == 2:
+            action = action.unsqueeze(1)
+
+        returns = torch.zeros(batch_size, 1, device=z.device)
+        timesteps = torch.zeros(batch_size, 1, dtype=torch.long, device=z.device)
+
+        _, state_preds = self.transformer(z, action, returns, timesteps)
+        return state_preds[:, 1]
+
+    def dynamics(self, h: torch.Tensor) -> torch.Tensor:
+        """Decision Transformer uses the current observation-space state as its prior."""
+        return h if h.dim() > 1 else h.unsqueeze(0)
+
+    def sample_z(
+        self,
+        logits_or_repr: torch.Tensor,
+        temperature: float = 1.0,
+        sample: bool = True,
+    ) -> torch.Tensor:
+        """Decision Transformer state carriers are continuous representations."""
+        del temperature, sample
+        return logits_or_repr
+
+    def decode(self, h: torch.Tensor, z: torch.Tensor) -> None:
         """No decoder in Decision Transformer."""
+        del h, z
         return None
 
     def actor_forward(
         self,
-        state: torch.Tensor,
+        h: torch.Tensor,
+        z: torch.Tensor,
     ) -> Optional[torch.Tensor]:
-        """Predict action (autoregressive)."""
-        B = state.shape[0] if state.dim() > 1 else 1
+        """Predict action from the current state token."""
+        del h
+        z = self._normalize_state(z)
+        batch_size = z.shape[0]
 
-        if state.dim() == 1:
-            state = state.unsqueeze(0).unsqueeze(0)
-        if state.dim() == 2:
-            state = state.unsqueeze(1)
+        action = torch.zeros(batch_size, 1, self.config.d_action, device=z.device)
+        returns = torch.zeros(batch_size, 1, device=z.device)
+        timesteps = torch.zeros(batch_size, 1, dtype=torch.long, device=z.device)
 
-        action = torch.zeros(B, 1, self.config.d_action, device=state.device)
-        returns = torch.zeros(B, 1, device=state.device)
-        timesteps = torch.arange(1, device=state.device).unsqueeze(0).expand(B, -1)
-
-        action_logits, _ = self.transformer(state, action, returns, timesteps)
-        return action_logits.squeeze(1)
+        action_logits, _ = self.transformer(z, action, returns, timesteps)
+        return action_logits[:, 1]
 
     def predict_reward(
         self,
-        state: torch.Tensor,
-        action: Optional[torch.Tensor] = None,
+        h: torch.Tensor,
+        z: torch.Tensor,
     ) -> None:
         """Decision Transformer doesn't predict rewards directly."""
+        del h, z
         return None
 
     def initial_state(
         self,
         batch_size: int = 1,
         device: Optional[torch.device] = None,
-    ) -> torch.Tensor:
-        """Initialize starting state."""
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Initialize hidden and latent state in observation space."""
         if device is None:
             device = self._device
-        return torch.zeros(batch_size, self.config.d_obs, device=device)
-
-    def sample_state(
-        self,
-        logits: torch.Tensor,
-        temperature: float = 1.0,
-        sample: bool = True,
-    ) -> torch.Tensor:
-        """Passthrough for continuous state."""
-        return logits
+        state = torch.zeros(batch_size, self.state_dim, device=device)
+        return state, state
 
     def to(self, device: torch.device) -> "DecisionTransformerAdapter":
         super().to(device)
@@ -281,7 +281,7 @@ class DecisionTransformerAdapter(WorldModelAdapter):
         return self
 
 
-from world_model_lens.backends.registry import REGISTRY, register
+from world_model_lens.backends.registry import register
 from world_model_lens.core.types import WorldModelFamily
 
 register(

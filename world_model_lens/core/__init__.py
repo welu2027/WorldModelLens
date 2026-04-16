@@ -5,7 +5,7 @@ This module provides generic abstractions that work with ANY world model:
 - WorldTrajectory: Generic trajectory container
 - WorldDynamics: Dynamics prediction outputs
 - WorldModelConfig: Minimal configuration
-- WorldModelAdapter: Abstract interface for any world model
+- BaseModelAdapter: Abstract interface for any world model
 
 Supported architectures:
 - Ha & Schmidhuber World Models (VAE + MDN-RNN)
