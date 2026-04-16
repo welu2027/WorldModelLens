@@ -182,6 +182,7 @@ class HookedWorldModel:
             HookedWorldModel instance
         """
         from world_model_lens.backends import REGISTRY as registry
+
         adapter_cls = registry.get(backend)
         adapter = adapter_cls(config) if config else adapter_cls.from_checkpoint(path)
 
@@ -522,6 +523,19 @@ class HookedWorldModel:
                     names_filter,
                 )
 
+            # Dedicated hook point for KV-style cache manipulation. Some
+            # transformer-based adapters maintain a growing key/value memory
+            # that users may want to edit without re-running the whole
+            # sequence. We expose a hook component named "kv_cache" which
+            # receives the full ActivationCache and can mutate it in-place.
+            manager = getattr(self, "_hook_cache_manager", None)
+            if manager is not None:
+                manager.apply_kv_hooks(
+                    cache,
+                    t,
+                    HookContext(timestep=t, component="kv_cache", trajectory_so_far=states),
+                )
+
             # Check for optional target encoder (e.g. for I-JEPA/JEPA models)
             if hasattr(self.adapter, "target_encode"):
                 target_encoding = self.adapter.target_encode(obs.unsqueeze(0))
@@ -531,7 +545,9 @@ class HookedWorldModel:
                         "target_encoding",
                         t,
                         target_encoding,
-                        HookContext(timestep=t, component="target_encoding", trajectory_so_far=states),
+                        HookContext(
+                            timestep=t, component="target_encoding", trajectory_so_far=states
+                        ),
                         cache,
                         names_filter,
                     )
