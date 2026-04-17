@@ -1,3 +1,4 @@
+#examples/ijepa/counterfactual_analysis.py
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -12,7 +13,7 @@ import os
 
 class IJEPACounterfactualAnalyzer:
     def __init__(self):
-        config = WorldModelConfig(backend="ijepa", d_embed=192, n_layers=6, n_heads=3)
+        config = WorldModelConfig(backend="ijepa", d_embed=192, n_layers=6, n_heads=3, predictor_embed_dim=192)
         self.adapter = IJEPAAdapter(config)
         checkpoint_path = "ijepa_mini.pth"
         if os.path.exists(checkpoint_path):
@@ -24,7 +25,7 @@ class IJEPACounterfactualAnalyzer:
         
         self.img_a_raw = get_sample_image()
         self.img_a = preprocess_image(self.img_a_raw)
-        self.img_b_raw = self.img_a_raw.transpose(Image.FLIP_LEFT_RIGHT)
+        self.img_b_raw = self.img_a_raw.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
         self.img_b = preprocess_image(self.img_b_raw)
         
         self.hook_fire_count = 0
@@ -33,8 +34,17 @@ class IJEPACounterfactualAnalyzer:
         self.hook_fire_count = 0
         with torch.no_grad():
             if hasattr(self.wm.adapter, "hooks"):
-                self.wm.adapter.hooks = self.wm.hook_registry
-            self.wm.adapter.current_timestep = 0
+                registry = self.wm.hook_registry
+                self.wm.adapter.hooks = registry
+                self.wm.adapter.context_encoder.hooks = registry
+                self.wm.adapter.context_encoder.current_timestep = 0
+
+                self.wm.adapter.target_encoder.hooks = registry
+                self.wm.adapter.target_encoder.current_timestep = 0
+
+                self.wm.adapter.predictor.hooks = registry
+                self.wm.adapter.predictor.current_timestep = 0
+            #self.wm.adapter.current_timestep = 0
             
             traj, cache = self.wm.run_with_cache(img_tensor)
             pred = cache.get("z_prior", 0)
@@ -66,7 +76,8 @@ class IJEPACounterfactualAnalyzer:
                     self.adapter.last_target_ids = target_ids
                     
                     pred, cache = self._run_verified_pred(self.img_a)
-                    target_reps = cache.get("target_encoding", 0)
+                    target_reps = cache.get("target_encoding", timestep=0)
+                    assert target_reps is not None, "target_encoding missing from cache"
                     target_gt = target_reps[0, target_ids, :] if target_reps.dim() == 3 else target_reps[target_ids, :]
                     mse = F.mse_loss(pred, target_gt).item()
                     
@@ -98,12 +109,14 @@ class IJEPACounterfactualAnalyzer:
         
         _, cache_b = self._run_verified_pred(self.img_b, expect_hook=True)
         encoded_b = activations_b['val']
-        target_reps_b = cache_b.get("target_encoding", 0)
+        target_reps_b = cache_b.get("target_encoding", timestep=0)
+        assert target_reps_b is not None, "target_encoding missing from cache" 
         gt_b_latent = target_reps_b[0, test_patches, :] if target_reps_b.dim() == 3 else target_reps_b[test_patches, :]
         
         self.wm.clear_hooks()
         _, cache_a = self._run_verified_pred(self.img_a, expect_hook=False)
-        target_reps_a = cache_a.get("target_encoding", 0)
+        target_reps_a = cache_a.get("target_encoding", timestep=0)
+        assert target_reps_a is not None, "target_encoding missing from cache"
         gt_a_latent = target_reps_a[0, test_patches, :] if target_reps_a.dim() == 3 else target_reps_a[test_patches, :]
 
         # 2. Intervention
@@ -165,7 +178,7 @@ class IJEPACounterfactualAnalyzer:
         plt.axis('off')
 
         plt.suptitle("IJEPACounterfactualAnalyzer | Verified Visual Foundations", fontsize=18, y=0.98)
-        plt.tight_layout(rect=[0, 0.03, 1, 0.95])
+        plt.tight_layout(rect=(0, 0.03, 1, 0.95))
         
         if os.environ.get("SAVE_PLOT"):
             plt.savefig("counterfactual_analysis_verified.png")
