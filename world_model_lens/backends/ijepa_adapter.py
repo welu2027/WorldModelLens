@@ -10,6 +10,7 @@ from world_model_lens.backends.base_adapter import BaseModelAdapter, WorldModelC
 from world_model_lens.backends.registry import register
 from world_model_lens.core.types import WorldModelFamily
 from world_model_lens.core.config import WorldModelConfig
+from world_model_lens.core.hooked_root import HookedRootModule
 
 from world_model_lens.core.hooks import HookContext
 logger = logging.getLogger(__name__)
@@ -44,6 +45,12 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
+        self.hook_query = nn.Identity()
+        self.hook_key = nn.Identity()
+        self.hook_value = nn.Identity()
+        self.hook_pattern = nn.Identity()
+        self.hook_z = nn.Identity()
+
         self.last_attn_weights = None
     def forward(self, x, mask=None):
         B, N, C = x.shape
@@ -51,6 +58,10 @@ class Attention(nn.Module):
             self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         )
         q, k, v = qkv[0], qkv[1], qkv[2]
+
+        q = self.hook_query(q)
+        k = self.hook_key(k)
+        v = self.hook_value(v)
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
 
@@ -60,19 +71,12 @@ class Attention(nn.Module):
 
         attn = attn.softmax(dim=-1)
         self.last_attn_weights = attn.detach()
+        attn = self.hook_pattern(attn)
 
         attn = self.attn_drop(attn)
 
-        # per-head weighted values: [B, num_heads, N, head_dim]
-        out_heads = (attn @ v)
-        
-        # [HOOK POINT] Head-level intervention
-        if hooks is not None:
-            ctx = HookContext(timestep=timestep, component="attn.heads")
-            out_heads = hooks.apply(f"{prefix}attn.heads", timestep, out_heads, ctx)
-
-        # Combine heads
-        x = out_heads.transpose(1, 2).reshape(B, N, C)
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        x = self.hook_z(x)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
@@ -93,21 +97,22 @@ class Block(nn.Module):
             nn.Dropout(drop),
         )
 
-    def forward(self, x, mask=None, hooks=None, timestep=0, prefix=""):
-        # 1. Attention path
-        attn_out = self.attn(self.norm1(x), mask=mask, hooks=hooks, timestep=timestep, prefix=prefix)
-        x = x + attn_out
-        
-        # 2. MLP path
+        self.hook_resid_mid = nn.Identity()
+        self.hook_mlp_in = nn.Identity()
+        self.hook_mlp_out = nn.Identity()
+        self.hook_resid_post = nn.Identity()
+
+    def forward(self, x, mask=None):
+        x = x + self.attn(self.norm1(x), mask=mask)
+        x = self.hook_resid_mid(x)
+
         mlp_in = self.norm2(x)
+        mlp_in = self.hook_mlp_in(mlp_in)
         mlp_out = self.mlp(mlp_in)
-        
-        # [HOOK POINT] MLP output intervention
-        if hooks is not None:
-            ctx = HookContext(timestep=timestep, component="mlp")
-            mlp_out = hooks.apply(f"{prefix}mlp", timestep, mlp_out, ctx)
-            
+        mlp_out = self.hook_mlp_out(mlp_out)
+
         x = x + mlp_out
+        x = self.hook_resid_post(x)
         return x
 
 class VisionTransformer(nn.Module):
@@ -125,6 +130,8 @@ class VisionTransformer(nn.Module):
             [Block(dim=embed_dim, num_heads=num_heads) for _ in range(depth)]
         )
         self.norm = nn.LayerNorm(embed_dim)
+        
+        self.hook_resid_pre = nn.Identity()
 
         # Proper initialization for positional embeddings
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
@@ -166,15 +173,9 @@ class VisionTransformer(nn.Module):
     def forward_blocks(self, x, mask=None, hooks=None, timestep=0):
         """Processes latent embeddings through the transformer blocks."""
         x = self.pos_drop(x)
-        for i, block in enumerate(self.blocks):
-            # Internal block hooks are handled by passing hooks/prefix to block.forward
-            block_prefix = f"{self.prefix}block_{i}."
-            x = block(x, mask=mask, hooks=hooks, timestep=timestep, prefix=block_prefix)
-            
-            # Legacy/compatibility block-level hook (output of full block)
-            if hooks is not None:
-                ctx = HookContext(timestep=timestep, component=f"block_{i}")
-                x = hooks.apply(f"{self.prefix}block_{i}", timestep, x, ctx)
+        x = self.hook_resid_pre(x)
+        for block in self.blocks:
+            x = block(x, mask=mask)
         x = self.norm(x)
         if hooks is not None:
             ctx = HookContext(timestep=timestep, component="norm")
@@ -202,6 +203,8 @@ class IJEPAPredictor(nn.Module):
             [Block(dim=predictor_embed_dim, num_heads=num_heads) for _ in range(depth)]
         )
         self.norm = nn.LayerNorm(predictor_embed_dim)
+        
+        self.hook_resid_pre = nn.Identity()
 
         # Project back to encoder representation space for MSE loss
         self.predictor_project_back = nn.Linear(predictor_embed_dim, encoder_embed_dim)
@@ -230,22 +233,9 @@ class IJEPAPredictor(nn.Module):
 
         # 3. Process concatenated sequence
         x = torch.cat([context_inputs, target_inputs], dim=1)
-        
-        hooks = getattr(self, "hooks", None)
-        timestep = getattr(self, "current_timestep", 0)
-        
-        if hooks is not None:
-            ctx = HookContext(timestep=timestep, component="predictor.input")
-            x = hooks.apply(f"{self.prefix}input", timestep, x, ctx)
-        
-        for i, block in enumerate(self.blocks):
-            block_prefix = f"{self.prefix}block_{i}."
-            x = block(x, hooks=hooks, timestep=timestep, prefix=block_prefix)
-            
-            if hooks is not None:
-                ctx = HookContext(timestep=timestep, component=f"block_{i}")
-                x = hooks.apply(f"{self.prefix}block_{i}", timestep, x, ctx)
-                
+        x = self.hook_resid_pre(x)
+        for block in self.blocks:
+            x = block(x)
         x = self.norm(x)
 
         # 4. Extract target predictions and project back
@@ -264,11 +254,12 @@ class IJEPAPredictor(nn.Module):
 
 
 @register("ijepa", WorldModelFamily.JEPA, "Image Joint-Embedding Predictive Architecture")
-class IJEPAAdapter(BaseModelAdapter):
+class IJEPAAdapter(BaseModelAdapter, HookedRootModule):
     """Architecturally correct adapter for I-JEPA."""
 
     def __init__(self, config: WorldModelConfig):
-        super().__init__(config)
+        BaseModelAdapter.__init__(self, config)
+        HookedRootModule.__init__(self)
         self.config = config
 
         # Parameters from config
@@ -314,14 +305,7 @@ class IJEPAAdapter(BaseModelAdapter):
         self.last_context_ids = None
         self.last_target_ids = None
         
-        # Hooking support
-        self.hooks = None
-        self.current_timestep = 0
-        
-        # Set prefixes for components
-        self.context_encoder.prefix = "context_encoder."
-        self.target_encoder.prefix = "target_encoder."
-        self.predictor.prefix = "predictor."
+        self.setup_hooks()
 
     @property
     def capabilities(self) -> WorldModelCapabilities:

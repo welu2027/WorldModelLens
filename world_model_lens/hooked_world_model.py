@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from world_model_lens.core.world_state import WorldState, WorldTrajectory, WorldDynamics
     from world_model_lens.core.world_trajectory import WorldTrajectory
     from world_model_lens.core.config import WorldModelConfig
+    from world_model_lens.core.latent_state import LatentState
 
 from world_model_lens.core.hooks import HookContext, HookPoint, HookRegistry
 from world_model_lens.core.activation_cache import ActivationCache
@@ -161,6 +162,33 @@ class HookedWorldModel:
             return decode(state, posterior)
 
         return decode(state)
+
+    def _build_state(
+        self,
+        h: torch.Tensor,
+        z_post_prob: torch.Tensor,
+        z_prior_prob: torch.Tensor,
+        t: int,
+        action_seq: Optional[torch.Tensor] = None,
+        reward_val: Optional[torch.Tensor] = None,
+        cont_val: Optional[torch.Tensor] = None,
+        actor_logits_out: Optional[torch.Tensor] = None,
+        value_val: Optional[torch.Tensor] = None,
+    ) -> Any:
+        """Helper to build a LatentState object. Used by ForwardRunner."""
+        from world_model_lens.core.latent_state import LatentState
+
+        return LatentState(
+            h_t=h,
+            z_posterior=z_post_prob,
+            z_prior=z_prior_prob,
+            timestep=t,
+            action=action_seq[t] if action_seq is not None and t < len(action_seq) else None,
+            reward_pred=reward_val,
+            cont_pred=cont_val,
+            value_pred=value_val,
+            actor_logits=actor_logits_out,
+        )
 
     @classmethod
     def from_checkpoint(
