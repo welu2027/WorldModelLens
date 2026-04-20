@@ -23,7 +23,7 @@ class FormalCircuitDiscoverer:
             d_embed=192,
             n_layers=6,
             n_heads=3,
-            predictor_embed_dim=192,
+            predictor_embed_dim=384,
         )
 
         self.adapter = IJEPAAdapter(self.config)

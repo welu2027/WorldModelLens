@@ -87,7 +87,7 @@ def visualize_research_ijepa(target_ids=None, k=6, layout_mode="importance"):
     raw_img = get_sample_image()
     img_tensor = preprocess_image(raw_img)
     
-    config = WorldModelConfig(backend="ijepa", d_embed=192, n_layers=6, n_heads=3, predictor_embed_dim=192)
+    config = WorldModelConfig(backend="ijepa", d_embed=192, n_layers=6, n_heads=3, predictor_embed_dim=384)
     adapter = IJEPAAdapter(config)
     
     import os

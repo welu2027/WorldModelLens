@@ -25,7 +25,7 @@ class AttributionExplorer:
         self.raw_img = get_sample_image()
         self.img_tensor = preprocess_image(self.raw_img)
         
-        config = WorldModelConfig(backend="ijepa", d_embed=384, n_layers=6, n_heads=6)
+        config = WorldModelConfig(backend="ijepa", d_embed=192, n_layers=6, n_heads=3, predictor_embed_dim=384, predictor_depth=4, predictor_heads=6)
         self.adapter = IJEPAAdapter(config)
         
         # Load weights if they exist (best effort)
