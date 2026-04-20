@@ -9,6 +9,8 @@ from world_model_lens import HookedWorldModel
 from world_model_lens.backends.ijepa_adapter import IJEPAAdapter
 from world_model_lens.core.config import WorldModelConfig
 from image_utils import get_sample_image, preprocess_image, get_ijepa_masks
+import matplotlib.pyplot as plt
+from matplotlib import cm
 
 def get_patch_rect(patch_id, grid_size=14, img_size=224):
     """Calculates [x, y, w, h] for a patch ID."""
@@ -55,10 +57,11 @@ def draw_attribution_viz(ax, G, pos, target_node, top_n_labels=3):
     
     for i in edge_ranks:
         u, v = edges[i]
-        color = plt.cm.viridis(norm_weights[i])
+        cmap = plt.get_cmap('viridis')
+        color = cmap(norm_weights[i])
         is_strongest = (i == edge_ranks[0])
         nx.draw_networkx_edges(G, pos, edgelist=[(u, v)], width=2 + 10 * norm_weights[i], 
-                               edge_color=[color] if not is_strongest else ["#FFD700"], 
+                               edge_color=color if not is_strongest else "#FFD700", 
                                arrowsize=20, ax=ax, alpha=0.8, connectionstyle="arc3,rad=0.1")
         if i in edge_ranks[:top_n_labels]:
             rank_str = f"#{i+1}: {weights[i]:.3f}"
@@ -84,7 +87,7 @@ def visualize_research_ijepa(target_ids=None, k=6, layout_mode="importance"):
     raw_img = get_sample_image()
     img_tensor = preprocess_image(raw_img)
     
-    config = WorldModelConfig(backend="ijepa", d_embed=192, n_layers=6, n_heads=3)
+    config = WorldModelConfig(backend="ijepa", d_embed=192, n_layers=6, n_heads=3, predictor_embed_dim=192)
     adapter = IJEPAAdapter(config)
     
     import os

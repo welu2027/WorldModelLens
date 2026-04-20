@@ -1,3 +1,4 @@
+#examples/ijepa/circuit_view.py
 import torch
 import networkx as nx
 import matplotlib.pyplot as plt
@@ -9,6 +10,8 @@ from world_model_lens.backends.ijepa_adapter import IJEPAAdapter
 from world_model_lens.core.config import WorldModelConfig
 from image_utils import get_sample_image, preprocess_image, get_ijepa_masks
 import os
+from typing import cast, Any
+import matplotlib as mpl
 
 class ThresholdCircuitVisualizer:
     def __init__(self, threshold_pct=0.005):
@@ -16,7 +19,7 @@ class ThresholdCircuitVisualizer:
         self.raw_img = get_sample_image()
         self.img_tensor = preprocess_image(self.raw_img)
         
-        config = WorldModelConfig(backend="ijepa", d_embed=192, n_layers=6, n_heads=3)
+        config = WorldModelConfig(backend="ijepa", d_embed=192, n_layers=6, n_heads=3, predictor_embed_dim=192)
         self.adapter = IJEPAAdapter(config)
         
         checkpoint_path = "ijepa_mini.pth"
@@ -95,8 +98,11 @@ class ThresholdCircuitVisualizer:
         weights = [G[u][v]['weight'] for u, v in G.edges()]
         if weights:
             max_w = max(weights)
-            nx.draw_networkx_edges(G, pos, width=[1 + 10*(w/max_w) for w in weights], 
-                                   edge_color=weights, edge_cmap=plt.cm.Greens, ax=ax, alpha=0.6)
+            widths = [1 + 10 * (w / max_w) for w in weights]
+            draw_edges = cast(Any, nx.draw_networkx_edges)
+
+            draw_edges(G, pos, width=widths, 
+                                   edge_color=weights, edge_cmap=mpl.colormaps["Greens"], ax=ax, alpha=0.6)
             
         nx.draw_networkx_nodes(G, pos, nodelist=[target_node], node_color="#F44336", node_size=1500, ax=ax)
         nx.draw_networkx_nodes(G, pos, nodelist=[n for n in G.nodes() if n != target_node], 

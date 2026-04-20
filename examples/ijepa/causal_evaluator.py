@@ -1,3 +1,4 @@
+#examples/ijepa/causal_evaluation.py
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -8,6 +9,7 @@ from world_model_lens.backends.ijepa_adapter import IJEPAAdapter
 from world_model_lens.core.config import WorldModelConfig
 from world_model_lens.core.hooks import HookPoint
 from image_utils import get_sample_image, preprocess_image, get_ijepa_masks
+import numpy as np
 
 class IJEPAFaithfulnessEvaluator:
     def __init__(self, model: IJEPAAdapter, img_tensor: torch.Tensor):
@@ -114,7 +116,7 @@ class IJEPAFaithfulnessEvaluator:
             # Random removal
             rand_metrics = []
             for order in random_orders:
-                ablated_r = order[:k]
+                ablated_r = order[:k].tolist()
                 active_r = [pid for pid in context_ids if pid not in ablated_r]
                 rand_metrics.append(self.run_intervention(target_id, active_r, ablated_r))
             
@@ -130,7 +132,7 @@ class IJEPAFaithfulnessEvaluator:
             # Random addition
             rand_metrics = []
             for order in random_orders:
-                active_r = order[:k]
+                active_r = order[:k].tolist()
                 rand_metrics.append(self.run_intervention(target_id, active_r, []))
             
             avg_rand = {m: np.mean([r[m] for r in rand_metrics]) for m in ["mse", "l2", "cos"]}
@@ -139,7 +141,7 @@ class IJEPAFaithfulnessEvaluator:
         return results
 
 def calculate_auc(values):
-    return np.trapz(values) / len(values) if values else 0
+    return np.trapezoid(values) / len(values) if values else 0
 
 def compute_monotonicity(values):
     if len(values) < 2: return 0
@@ -203,13 +205,14 @@ def plot_faithfulness(results_list, metric="mse"):
 if __name__ == "__main__":
     import os
     
-    config = WorldModelConfig(backend="ijepa", d_embed=192, n_layers=6, n_heads=3)
+    config = WorldModelConfig(backend="ijepa", d_embed=192, n_layers=6, n_heads=3, predictor_embed_dim=192)
     model = IJEPAAdapter(config)
     
     checkpoint_path = "ijepa_mini.pth"
     if os.path.exists(checkpoint_path):
         print(f"Loading trained weights from {checkpoint_path}...")
-        model.load_state_dict(torch.load(checkpoint_path, weights_only=True))
+        state_dict = torch.load(checkpoint_path, weights_only=True)
+        model.load_state_dict(state_dict, strict=False)
     model.eval()
     
     raw_img = get_sample_image()
