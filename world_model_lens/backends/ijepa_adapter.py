@@ -433,7 +433,7 @@ class IJEPAAdapter(BaseModelAdapter):
         context_latents = self.context_encoder(obs, patch_ids=context_ids)  # [B, N_context, C]
 
         # 4. Predict targets block-wise as per the original I-JEPA paper
-        total_loss = torch.Tensor(0.0, device=obs.device)
+        total_loss = torch.tensor(0.0, device=obs.device)
         for block_ids in target_ids_list:
             target_gt_block = target_reps[:, block_ids, :]
             predicted_block = self.predictor(context_latents, context_ids, block_ids)
@@ -504,6 +504,8 @@ class IJEPAAdapter(BaseModelAdapter):
         if self.last_target_ids is None:
             self.last_target_ids = list(range(10))
 
+        self.predictor.hooks = self.hooks
+        self.predictor.current_timestep = self.current_timestep
         pred_latents = self.predictor(h, self.last_context_ids, self.last_target_ids)
         return pred_latents
 
