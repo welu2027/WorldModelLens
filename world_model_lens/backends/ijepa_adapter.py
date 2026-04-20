@@ -504,6 +504,8 @@ class IJEPAAdapter(BaseModelAdapter):
         if self.last_target_ids is None:
             self.last_target_ids = list(range(10))
 
+        self.predictor.hooks = self.hooks
+        self.predictor.current_timestep = self.current_timestep
         pred_latents = self.predictor(h, self.last_context_ids, self.last_target_ids)
         return pred_latents
 
