@@ -1,11 +1,11 @@
-"""run_suite.py — Unified I-JEPA Interpretability Orchestrator
+"""orchestrator.py — Unified I-JEPA Interpretability Orchestrator
 
 Aggregates all interpretability experiments into a single call:
 
     results = run_full_suite(image, checkpoint_path, seed=42)
-    # -> JSON-serializable dict + suite_results/suite_summary.png
+    # -> JSON-serializable dict + orchestrator_results/orchestrator_summary.png
 
-Experiments covered (model loaded once, shared across all):
+Experiments covered (model loaded once, ONE forward pass shared across all):
   1. Attribution Graph   — attention weights, middle vs. final predictor layer
   2. Circuit Discovery  — energy-threshold circuit patches
   3. Faithfulness       — Top-K ablation/reconstruction AUC (AOPC proxy)
@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -37,7 +38,76 @@ from world_model_lens.core.config import WorldModelConfig
 from image_utils import get_sample_image, preprocess_image
 
 
-# helpers
+# ---------------------------------------------------------------------------
+# Shared compute cache
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ForwardCache:
+    """Results of a single forward pass per target, consumed by all experiments."""
+    context_ids: List[int] = field(default_factory=list)
+    # target_id -> ground-truth latent [1, C]
+    target_gt: Dict[int, torch.Tensor] = field(default_factory=dict)
+    # target_id -> {layer_idx: attention weights [n_context]}
+    predictor_attn: Dict[int, Dict[int, np.ndarray]] = field(default_factory=dict)
+    # target_id -> MSE with full context (baseline for structural experiment)
+    clean_mse: Dict[int, float] = field(default_factory=dict)
+
+
+def run_forward_pass(
+    img_tensor: torch.Tensor,
+    context_ids: List[int],
+    target_ids: List[int],
+    adapter: IJEPAAdapter,
+    wm: HookedWorldModel,
+) -> ForwardCache:
+    """One forward pass per target — all experiments read from this instead of re-running.
+
+    Captures per target:
+      - predictor attention at every layer (attn weights shape [n_context])
+      - ground-truth target latent from target encoder
+      - clean baseline MSE with full context
+    """
+    cache = ForwardCache(context_ids=list(context_ids))
+
+    for target_id in target_ids:
+        ctx = [c for c in context_ids if c != target_id]
+        adapter.last_context_ids = ctx
+        adapter.last_target_ids = [target_id]
+
+        with torch.no_grad():
+            # Single forward pass: runs encode → predictor → target encoder.
+            # This populates last_attn_weights on every predictor block.
+            _, wm_cache = wm.run_with_cache(img_tensor)
+
+            # --- predictor attention at every layer ---
+            cache.predictor_attn[target_id] = {}
+            for layer_idx, block in enumerate(adapter.predictor.blocks):
+                raw = block.attn.last_attn_weights  # [B, heads, seq, seq]
+                w = raw[0].mean(0)[-1, : len(ctx)].cpu().numpy()
+                cache.predictor_attn[target_id][layer_idx] = w
+
+            # --- target ground truth ---
+            reps = wm_cache.get("target_encoding", 0)
+            if reps is not None:
+                gt = reps[0, [target_id], :] if reps.dim() == 3 else reps[[target_id], :]
+            else:
+                full = adapter.target_encode(img_tensor)  # [1, N, C]
+                gt = full[:, [target_id], :].squeeze(0) if full.dim() == 3 else full[[target_id], :]
+            cache.target_gt[target_id] = gt
+
+            # --- clean baseline MSE (encode+dynamics already ran inside wm_cache;
+            #     re-use the same adapter state without a new wm.run_with_cache) ---
+            ctx_lat, _ = adapter.encode(img_tensor)
+            pred = adapter.dynamics(ctx_lat).squeeze(0)
+            cache.clean_mse[target_id] = F.mse_loss(pred.flatten(), gt.flatten()).item()
+
+    return cache
+
+
+# ---------------------------------------------------------------------------
+# Low-level helpers
+# ---------------------------------------------------------------------------
 
 def _seeded_masks(
     seed: int,
@@ -64,59 +134,22 @@ def _load_model(
         elif isinstance(sd, dict) and "state_dict" in sd:
             sd = sd["state_dict"]
         adapter.load_state_dict(sd, strict=False)
-        print(f"[Suite] Loaded checkpoint: {checkpoint_path}")
+        print(f"[Orchestrator] Loaded checkpoint: {checkpoint_path}")
     else:
-        print("[Suite] No checkpoint — using random weights")
+        print("[Orchestrator] No checkpoint — using random weights")
     adapter.eval()
     wm = HookedWorldModel(adapter, config)
     return wm, adapter
 
 
-def _predictor_attn(
-    adapter: IJEPAAdapter,
-    wm: HookedWorldModel,
-    img_tensor: torch.Tensor,
-    context_ids: list[int],
-    target_id: int,
-    layer_idx: int = -1,
-) -> np.ndarray:
-    """Run one forward pass; return predictor attention for target→context."""
-    adapter.last_context_ids = context_ids
-    adapter.last_target_ids = [target_id]
-    with torch.no_grad():
-        wm.run_with_cache(img_tensor)
-        raw = adapter.predictor.blocks[layer_idx].attn.last_attn_weights
-        weights = raw[0].mean(0)[-1, : len(context_ids)].cpu().numpy()
-    return weights
-
-
-def _target_gt(
-    adapter: IJEPAAdapter,
-    wm: HookedWorldModel,
-    img_tensor: torch.Tensor,
-    context_ids: list[int],
-    target_id: int,
-) -> torch.Tensor:
-    """Return ground-truth target latent [1, C]."""
-    adapter.last_context_ids = context_ids
-    adapter.last_target_ids = [target_id]
-    with torch.no_grad():
-        _, cache = wm.run_with_cache(img_tensor)
-        reps = cache.get("target_encoding", 0)
-        if reps is not None:
-            gt = reps[0, [target_id], :] if reps.dim() == 3 else reps[[target_id], :]
-        else:
-            gt = adapter.target_encode(img_tensor)[:, [target_id], :]
-    return gt
-
-
 def _predict_mse(
     adapter: IJEPAAdapter,
     img_tensor: torch.Tensor,
-    active_ids: list[int],
+    active_ids: List[int],
     target_id: int,
     target_gt: torch.Tensor,
 ) -> float:
+    """MSE for a specific context subset — used in ablation/reconstruction loops."""
     if not active_ids:
         return float("nan")
     adapter.last_context_ids = active_ids
@@ -127,14 +160,15 @@ def _predict_mse(
     return F.mse_loss(pred.flatten(), target_gt.flatten()).item()
 
 
-# experiment 1: attribution
+# ---------------------------------------------------------------------------
+# Experiment 1: Attribution
+# ---------------------------------------------------------------------------
 
 def _run_attribution(
-    wm: HookedWorldModel,
+    fwd: ForwardCache,
     adapter: IJEPAAdapter,
-    img_tensor: torch.Tensor,
-    context_ids: list[int],
-    target_ids: list[int],
+    context_ids: List[int],
+    target_ids: List[int],
     k: int = 6,
 ) -> dict:
     predictor_depth = len(adapter.predictor.blocks)
@@ -145,7 +179,7 @@ def _run_attribution(
         ctx = [c for c in context_ids if c != target_id]
         per_layer: dict[str, dict] = {}
         for name, layer_idx in layers.items():
-            w = _predictor_attn(adapter, wm, img_tensor, ctx, target_id, layer_idx)
+            w = fwd.predictor_attn[target_id][layer_idx]
             top_idx = np.argsort(w)[::-1][:k]
             per_layer[name] = {
                 "top_context_patches": [ctx[i] for i in top_idx],
@@ -158,18 +192,19 @@ def _run_attribution(
     return {"targets": per_target, "k": k, "layers_analyzed": list(layers.keys())}
 
 
-# experiment 2: circuit discovery
+# ---------------------------------------------------------------------------
+# Experiment 2: Circuit Discovery
+# ---------------------------------------------------------------------------
 
 def _run_circuit(
-    wm: HookedWorldModel,
-    adapter: IJEPAAdapter,
-    img_tensor: torch.Tensor,
-    context_ids: list[int],
+    fwd: ForwardCache,
+    context_ids: List[int],
     target_id: int,
     threshold_pct: float = 0.005,
 ) -> dict:
     ctx = [c for c in context_ids if c != target_id]
-    w = _predictor_attn(adapter, wm, img_tensor, ctx, target_id)
+    last_layer = max(fwd.predictor_attn[target_id].keys())
+    w = fwd.predictor_attn[target_id][last_layer]
 
     total_energy = w.sum()
     circuit_idx = np.where(w > total_energy * threshold_pct)[0]
@@ -188,26 +223,28 @@ def _run_circuit(
     }
 
 
-# experiment 3: faithfulness (AOPC proxy)
+# ---------------------------------------------------------------------------
+# Experiment 3: Faithfulness (AOPC proxy)
+# ---------------------------------------------------------------------------
 
 def _run_faithfulness(
-    wm: HookedWorldModel,
+    fwd: ForwardCache,
     adapter: IJEPAAdapter,
     img_tensor: torch.Tensor,
-    context_ids: list[int],
+    context_ids: List[int],
     target_id: int,
     seed: int,
     n_steps: int = 15,
 ) -> dict:
     rng = np.random.default_rng(seed)
     ctx = [c for c in context_ids if c != target_id]
+    gt = fwd.target_gt[target_id]
 
-    w = _predictor_attn(adapter, wm, img_tensor, ctx, target_id)
+    last_layer = max(fwd.predictor_attn[target_id].keys())
+    w = fwd.predictor_attn[target_id][last_layer]
     sorted_idx = np.argsort(w)[::-1]
     top_ctx = [ctx[i] for i in sorted_idx]
     rand_ctx = rng.permutation(ctx).tolist()
-
-    gt = _target_gt(adapter, wm, img_tensor, ctx, target_id)
 
     step = max(1, len(ctx) // n_steps)
     k_values = list(range(1, len(ctx), step))[:n_steps]
@@ -216,15 +253,13 @@ def _run_faithfulness(
     reconstruction: dict[str, list] = {"top": [], "random": [], "k_values": k_values}
 
     for k in k_values:
-        # ablation: remove k patches
         ablation["top"].append(_predict_mse(adapter, img_tensor, [c for c in ctx if c not in top_ctx[:k]], target_id, gt))
         ablation["random"].append(_predict_mse(adapter, img_tensor, [c for c in ctx if c not in rand_ctx[:k]], target_id, gt))
-        # reconstruction: use only k patches
         reconstruction["top"].append(_predict_mse(adapter, img_tensor, top_ctx[:k], target_id, gt))
         reconstruction["random"].append(_predict_mse(adapter, img_tensor, rand_ctx[:k], target_id, gt))
 
     def _auc(vals: list) -> float:
-        clean = [v for v in vals if v == v]  # drop NaN
+        clean = [v for v in vals if v == v]
         return float(np.trapz(clean) / max(1, len(clean))) if clean else 0.0
 
     top_auc = _auc(ablation["top"])
@@ -240,24 +275,23 @@ def _run_faithfulness(
     }
 
 
-# experiment 4: structural (layer importance)
+# ---------------------------------------------------------------------------
+# Experiment 4: Structural (layer importance)
+# ---------------------------------------------------------------------------
 
 def _run_structural(
-    wm: HookedWorldModel,
+    fwd: ForwardCache,
     adapter: IJEPAAdapter,
     img_tensor: torch.Tensor,
-    context_ids: list[int],
+    context_ids: List[int],
     target_id: int,
 ) -> dict:
     ctx = [c for c in context_ids if c != target_id]
-    gt = _target_gt(adapter, wm, img_tensor, ctx, target_id)
-
-    # Baseline MSE with all context
-    clean_mse = _predict_mse(adapter, img_tensor, ctx, target_id, gt)
+    gt = fwd.target_gt[target_id]
+    clean_mse = fwd.clean_mse[target_id]  # baseline from shared cache — no extra forward pass
 
     layer_scores: list[dict] = []
     for layer_idx, block in enumerate(adapter.predictor.blocks):
-        # Zero the output of this block via a temporary PyTorch hook
         handle = block.register_forward_hook(
             lambda m, inp, out: torch.zeros_like(out)
         )
@@ -286,32 +320,25 @@ def _run_structural(
     }
 
 
-# experiment 5: formal minimal circuit
+# ---------------------------------------------------------------------------
+# Experiment 5: Formal Minimal Circuit
+# ---------------------------------------------------------------------------
 
 def _run_formal_circuit(
-    wm: HookedWorldModel,
+    fwd: ForwardCache,
     adapter: IJEPAAdapter,
     img_tensor: torch.Tensor,
-    context_ids: list[int],
+    context_ids: List[int],
     target_id: int,
     threshold: float = 0.85,
 ) -> dict:
     ctx = [c for c in context_ids if c != target_id]
+    gt = fwd.target_gt[target_id]
 
-    # Rank patches by final-layer predictor attention
-    adapter.last_context_ids = ctx
-    adapter.last_target_ids = [target_id]
-    with torch.no_grad():
-        _, cache = wm.run_with_cache(img_tensor)
-        attn = adapter.predictor.blocks[-1].attn.last_attn_weights
-        attributions = attn[0].mean(0)[-1, : len(ctx)].cpu().numpy()
-        reps = cache.get("target_encoding", 0)
-        if reps is not None:
-            gt = reps[0, [target_id], :] if reps.dim() == 3 else reps[[target_id], :]
-        else:
-            gt = adapter.target_encode(img_tensor)[:, [target_id], :]
-
+    last_layer = max(fwd.predictor_attn[target_id].keys())
+    attributions = fwd.predictor_attn[target_id][last_layer]
     ranked_ctx = [ctx[i] for i in np.argsort(attributions)[::-1]]
+
     baseline_mse = torch.mean(gt**2).item()
 
     def _perf(active: list[int]) -> float:
@@ -320,7 +347,6 @@ def _run_formal_circuit(
         mse = _predict_mse(adapter, img_tensor, active, target_id, gt)
         return 1.0 - mse / (baseline_mse + 1e-6)
 
-    # Greedy build until threshold is met
     circuit: list[int] = []
     perf_curve: list[float] = []
     for patch in ranked_ctx:
@@ -343,11 +369,13 @@ def _run_formal_circuit(
     }
 
 
-# summary figure
+# ---------------------------------------------------------------------------
+# Summary figure
+# ---------------------------------------------------------------------------
 
 def _plot_summary(results: dict, output_dir: str) -> str:
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-    fig.suptitle("I-JEPA Interpretability Suite — Summary", fontsize=14, fontweight="bold")
+    fig.suptitle("I-JEPA Interpretability Orchestrator — Summary", fontsize=14, fontweight="bold")
 
     # Panel 1: attribution weights (first target, final layer)
     ax = axes[0, 0]
@@ -411,19 +439,21 @@ def _plot_summary(results: dict, output_dir: str) -> str:
     ax.grid(axis="y", alpha=0.3)
 
     plt.tight_layout()
-    out_path = os.path.join(output_dir, "suite_summary.png")
+    out_path = os.path.join(output_dir, "orchestrator_summary.png")
     plt.savefig(out_path, dpi=120, bbox_inches="tight")
     plt.close(fig)
     return out_path
 
 
-# main orchestrator
+# ---------------------------------------------------------------------------
+# Main Orchestrator
+# ---------------------------------------------------------------------------
 
 def run_full_suite(
     image: Union[str, Image.Image, None] = None,
     checkpoint_path: Optional[str] = None,
     seed: int = 42,
-    output_dir: str = "suite_results",
+    output_dir: str = "orchestrator_results",
     target_ids: Optional[List[int]] = None,
     num_context: int = 80,
     config_overrides: Optional[Dict[str, Any]] = None,
@@ -434,7 +464,7 @@ def run_full_suite(
         image: PIL image, path to image file, or None (downloads sample dog image).
         checkpoint_path: Path to .pth checkpoint. None uses random weights.
         seed: Random seed for reproducible masking and sampling.
-        output_dir: Directory where figures and suite_results.json are saved.
+        output_dir: Directory where figures and orchestrator_results.json are saved.
         target_ids: Explicit list of target patch IDs. None samples from seed.
         num_context: Number of context patches.
         config_overrides: Dict of WorldModelConfig field overrides (e.g. {"n_layers": 12}).
@@ -474,9 +504,13 @@ def run_full_suite(
         target_ids = auto_targets[:2]
 
     print(
-        f"[Suite] seed={seed} | targets={target_ids} | "
+        f"[Orchestrator] seed={seed} | targets={target_ids} | "
         f"context={len(context_ids)} patches | output={output_dir}/"
     )
+
+    # --- Shared forward pass: ONE run per target, consumed by all experiments ---
+    print("[Orchestrator] Running shared forward pass (compute cache)...")
+    fwd = run_forward_pass(img_tensor, context_ids, target_ids, adapter, wm)
 
     results: Dict[str, Any] = {
         "metadata": {
@@ -488,23 +522,23 @@ def run_full_suite(
         }
     }
 
-    # 1: Attribution
-    print("[Suite] 1/5 Attribution Graph...")
-    results["attribution"] = _run_attribution(wm, adapter, img_tensor, context_ids, target_ids)
+    # 1: Attribution — reads from fwd.predictor_attn
+    print("[Orchestrator] 1/5 Attribution Graph...")
+    results["attribution"] = _run_attribution(fwd, adapter, context_ids, target_ids)
 
-    # 2: Circuit discovery
-    print("[Suite] 2/5 Circuit Discovery...")
+    # 2: Circuit discovery — reads from fwd.predictor_attn
+    print("[Orchestrator] 2/5 Circuit Discovery...")
     results["circuit"] = {
         "per_target": {
-            str(tid): _run_circuit(wm, adapter, img_tensor, context_ids, tid)
+            str(tid): _run_circuit(fwd, context_ids, tid)
             for tid in target_ids
         }
     }
 
-    # 3: Faithfulness
-    print("[Suite] 3/5 Faithfulness Evaluation...")
+    # 3: Faithfulness — reads attn+gt from fwd, still runs ablation loops
+    print("[Orchestrator] 3/5 Faithfulness Evaluation...")
     per_faith = {
-        str(tid): _run_faithfulness(wm, adapter, img_tensor, context_ids, tid, seed)
+        str(tid): _run_faithfulness(fwd, adapter, img_tensor, context_ids, tid, seed)
         for tid in target_ids
     }
     results["faithfulness"] = {
@@ -512,19 +546,19 @@ def run_full_suite(
         "mean_aopc": float(np.mean([v["aopc"] for v in per_faith.values()])),
     }
 
-    # 4: Structural
-    print("[Suite] 4/5 Structural Circuits...")
+    # 4: Structural: reads gt+clean_mse from fwd, still runs layer-ablation loops
+    print("[Orchestrator] 4/5 Structural Circuits...")
     results["structural"] = {
         "per_target": {
-            str(tid): _run_structural(wm, adapter, img_tensor, context_ids, tid)
+            str(tid): _run_structural(fwd, adapter, img_tensor, context_ids, tid)
             for tid in target_ids
         }
     }
 
-    # 5: Formal circuit
-    print("[Suite] 5/5 Formal Minimal Circuit...")
+    # 5: Formal circuit: reads attn+gt from fwd, still runs greedy build
+    print("[Orchestrator] 5/5 Formal Minimal Circuit...")
     per_formal = {
-        str(tid): _run_formal_circuit(wm, adapter, img_tensor, context_ids, tid)
+        str(tid): _run_formal_circuit(fwd, adapter, img_tensor, context_ids, tid)
         for tid in target_ids
     }
     results["formal_circuit"] = {
@@ -534,35 +568,37 @@ def run_full_suite(
     }
 
     # Summary figure
-    print("[Suite] Generating summary figure...")
+    print("[Orchestrator] Generating summary figure...")
     figures: Dict[str, str] = {}
     try:
         figures["summary"] = _plot_summary(results, output_dir)
     except Exception as exc:
-        print(f"[Suite] Warning: summary figure failed — {exc}")
+        print(f"[Orchestrator] Warning: summary figure failed — {exc}")
 
     results["figures"] = figures
     results["metadata"]["elapsed_seconds"] = round(time.time() - t0, 2)
 
-    json_path = os.path.join(output_dir, "suite_results.json")
+    json_path = os.path.join(output_dir, "orchestrator_results.json")
     with open(json_path, "w") as fh:
         json.dump(results, fh, indent=2)
 
-    print(f"[Suite] Done in {results['metadata']['elapsed_seconds']}s → {json_path}")
+    print(f"[Orchestrator] Done in {results['metadata']['elapsed_seconds']}s → {json_path}")
     return results
 
 
+# ---------------------------------------------------------------------------
 # CLI
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Run the full I-JEPA interpretability suite.",
+        description="Run the full I-JEPA interpretability orchestrator.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--image", default=None, help="Path to input image (None = sample dog image)")
     parser.add_argument("--checkpoint", default="ijepa_mini.pth", help="Path to .pth checkpoint")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--output-dir", default="suite_results", help="Output directory")
+    parser.add_argument("--output-dir", default="orchestrator_results", help="Output directory")
     parser.add_argument("--targets", type=int, nargs="+", default=None, help="Target patch IDs")
     parser.add_argument("--num-context", type=int, default=80, help="Number of context patches")
     args = parser.parse_args()
@@ -576,7 +612,7 @@ if __name__ == "__main__":
         num_context=args.num_context,
     )
 
-    print("\n=== Suite Summary ===")
+    print("\n=== Orchestrator Summary ===")
     print(f"  Targets         : {res['metadata']['target_ids']}")
     print(f"  AOPC (mean)     : {res['faithfulness']['mean_aopc']:.4f}")
     print(f"  Circuit size    : {res['formal_circuit']['mean_circuit_size']:.1f} / {res['metadata']['context_size']}")
