@@ -1,16 +1,20 @@
 """orchestrator.py — Unified I-JEPA Interpretability Orchestrator
 
-Aggregates all interpretability experiments into a single call:
-
     results = run_full_suite(image, checkpoint_path, seed=42)
-    # -> JSON-serializable dict + orchestrator_results/orchestrator_summary.png
+    # -> JSON dict + orchestrator_results/orchestrator_summary.png
 
-Experiments covered (model loaded once, ONE forward pass shared across all):
-  1. Attribution Graph   — attention weights, middle vs. final predictor layer
-  2. Circuit Discovery  — energy-threshold circuit patches
-  3. Faithfulness       — Top-K ablation/reconstruction AUC (AOPC proxy)
-  4. Structural         — predictor layer importance via forward-hook ablation
-  5. Formal Circuit     — greedy minimal patch set reaching performance threshold
+Architecture:
+  SharedLatentState  — unified research substrate built from one forward pass per target
+  ExecutionEngine    — owns model refs; builds state and drives the experiment graph
+  EXPERIMENT_DAG     — explicit dependency graph; experiments run in topological order
+  EXPERIMENT_REGISTRY— pure functions (state, engine, img, upstream, seed, n_steps) -> dict
+
+Experiments:
+  1. attribution  — predictor attention weights, middle + final layer
+  2. circuit      — energy-threshold circuit patches
+  3. faithfulness — Top-K ablation/reconstruction AOPC proxy   [depends: attribution]
+  4. structural   — per-layer mean-ablation importance         [depends: forward]
+  5. formal       — greedy minimal circuit at 85% threshold    [depends: attribution]
 """
 
 from __future__ import annotations
@@ -21,11 +25,10 @@ import os
 import sys
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import matplotlib
-matplotlib.use("Agg")  # headless / non-interactive
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -39,74 +42,436 @@ from image_utils import get_sample_image, preprocess_image
 
 
 # ---------------------------------------------------------------------------
-# Shared compute cache
+# Shared Latent State
 # ---------------------------------------------------------------------------
 
 @dataclass
-class ForwardCache:
-    """Results of a single forward pass per target, consumed by all experiments."""
-    context_ids: List[int] = field(default_factory=list)
-    # target_id -> ground-truth latent [1, C]
-    target_gt: Dict[int, torch.Tensor] = field(default_factory=dict)
-    # target_id -> {layer_idx: attention weights [n_context]}
-    predictor_attn: Dict[int, Dict[int, np.ndarray]] = field(default_factory=dict)
-    # target_id -> MSE with full context (baseline for structural experiment)
+class SharedLatentState:
+    """Unified research substrate — populated once, consumed by all experiments.
+
+    Fields added here (vs old ForwardCache) intentionally support Phase 2-4:
+      ctx_latents           -> IG / CKA analysis
+      predictor_activations -> mean ablation, rollout, layer-wise probing
+      seed / mask record    -> reproducibility audit
+    """
+    context_ids: List[int]
+    target_ids: List[int]
+    seed: int
+    # Per-target tensors
+    target_gt: Dict[int, torch.Tensor] = field(default_factory=dict)            # [1, C]
+    ctx_latents: Dict[int, torch.Tensor] = field(default_factory=dict)          # [1, N_ctx, C]
+    predictor_attn: Dict[int, Dict[int, np.ndarray]] = field(default_factory=dict)   # layer -> [N_ctx]
+    predictor_activations: Dict[int, Dict[int, torch.Tensor]] = field(default_factory=dict)  # layer -> [1, seq, C]
     clean_mse: Dict[int, float] = field(default_factory=dict)
 
 
-def run_forward_pass(
-    img_tensor: torch.Tensor,
-    context_ids: List[int],
-    target_ids: List[int],
-    adapter: IJEPAAdapter,
-    wm: HookedWorldModel,
-) -> ForwardCache:
-    """One forward pass per target — all experiments read from this instead of re-running.
+# ---------------------------------------------------------------------------
+# Experiment DAG + topo-sort
+# ---------------------------------------------------------------------------
 
-    Captures per target:
-      - predictor attention at every layer (attn weights shape [n_context])
-      - ground-truth target latent from target encoder
-      - clean baseline MSE with full context
-    """
-    cache = ForwardCache(context_ids=list(context_ids))
+EXPERIMENT_DAG: Dict[str, List[str]] = {
+    "forward":      [],
+    "attribution":  ["forward"],
+    "circuit":      ["forward"],
+    "faithfulness": ["forward", "attribution"],   # consumes attribution's ranked patch list
+    "structural":   ["forward"],
+    "formal":       ["forward", "attribution"],   # consumes attribution's ranked patch list
+}
 
-    for target_id in target_ids:
-        ctx = [c for c in context_ids if c != target_id]
-        adapter.last_context_ids = ctx
-        adapter.last_target_ids = [target_id]
 
-        with torch.no_grad():
-            # Single forward pass: runs encode → predictor → target encoder.
-            # This populates last_attn_weights on every predictor block.
-            _, wm_cache = wm.run_with_cache(img_tensor)
+def _topo_sort(dag: Dict[str, List[str]]) -> List[str]:
+    visited: set = set()
+    order: List[str] = []
 
-            # --- predictor attention at every layer ---
-            cache.predictor_attn[target_id] = {}
-            for layer_idx, block in enumerate(adapter.predictor.blocks):
-                raw = block.attn.last_attn_weights  # [B, heads, seq, seq]
-                w = raw[0].mean(0)[-1, : len(ctx)].cpu().numpy()
-                cache.predictor_attn[target_id][layer_idx] = w
+    def visit(n: str) -> None:
+        if n in visited:
+            return
+        visited.add(n)
+        for dep in dag[n]:
+            visit(dep)
+        order.append(n)
 
-            # --- target ground truth ---
-            reps = wm_cache.get("target_encoding", 0)
-            if reps is not None:
-                gt = reps[0, [target_id], :] if reps.dim() == 3 else reps[[target_id], :]
-            else:
-                full = adapter.target_encode(img_tensor)  # [1, N, C]
-                gt = full[:, [target_id], :].squeeze(0) if full.dim() == 3 else full[[target_id], :]
-            cache.target_gt[target_id] = gt
-
-            # --- clean baseline MSE (encode+dynamics already ran inside wm_cache;
-            #     re-use the same adapter state without a new wm.run_with_cache) ---
-            ctx_lat, _ = adapter.encode(img_tensor)
-            pred = adapter.dynamics(ctx_lat).squeeze(0)
-            cache.clean_mse[target_id] = F.mse_loss(pred.flatten(), gt.flatten()).item()
-
-    return cache
+    for n in dag:
+        visit(n)
+    return order
 
 
 # ---------------------------------------------------------------------------
-# Low-level helpers
+# Execution Engine
+# ---------------------------------------------------------------------------
+
+class ExecutionEngine:
+    """Owns model references; builds SharedLatentState and drives the experiment DAG."""
+
+    def __init__(self, adapter: IJEPAAdapter, wm: HookedWorldModel) -> None:
+        self.adapter = adapter
+        self.wm = wm
+
+    def build_state(
+        self,
+        img_tensor: torch.Tensor,
+        context_ids: List[int],
+        target_ids: List[int],
+        seed: int,
+    ) -> SharedLatentState:
+        """One forward pass per target capturing all shared artifacts.
+
+        Uses PyTorch forward hooks so nothing is computed twice:
+          context_encoder hook  -> ctx_latents
+          predictor block hooks -> predictor_activations
+          predictor output hook -> prediction for clean_mse
+          wm.run_with_cache     -> target_gt + last_attn_weights at every block
+        """
+        state = SharedLatentState(
+            context_ids=list(context_ids),
+            target_ids=list(target_ids),
+            seed=seed,
+        )
+        adapter, wm = self.adapter, self.wm
+
+        for target_id in target_ids:
+            ctx = [c for c in context_ids if c != target_id]
+            adapter.last_context_ids = ctx
+            adapter.last_target_ids = [target_id]
+
+            _layer_acts: Dict[int, torch.Tensor] = {}
+            _pred_out: List[Optional[torch.Tensor]] = [None]
+            _enc_out: List[Optional[torch.Tensor]] = [None]
+            handles = []
+
+            for i, block in enumerate(adapter.predictor.blocks):
+                def _act_hook(m, inp, out, idx=i):
+                    _layer_acts[idx] = out.detach()
+                handles.append(block.register_forward_hook(_act_hook))
+
+            handles.append(adapter.predictor.register_forward_hook(
+                lambda m, inp, out: _pred_out.__setitem__(0, out.detach())
+            ))
+            handles.append(adapter.context_encoder.register_forward_hook(
+                lambda m, inp, out: _enc_out.__setitem__(0, out.detach())
+            ))
+
+            with torch.no_grad():
+                _, wm_cache = wm.run_with_cache(img_tensor)
+
+                # Predictor attention at every layer (set by wm.run_with_cache)
+                state.predictor_attn[target_id] = {}
+                for i, block in enumerate(adapter.predictor.blocks):
+                    raw = block.attn.last_attn_weights  # [B, heads, seq, seq]
+                    w = raw[0].mean(0)[-1, : len(ctx)].cpu().numpy()
+                    state.predictor_attn[target_id][i] = w
+
+                # Per-layer predictor activations
+                state.predictor_activations[target_id] = dict(_layer_acts)
+
+                # Context latents: encoder output is already [1, len(ctx), C]
+                if _enc_out[0] is not None:
+                    state.ctx_latents[target_id] = _enc_out[0]
+
+                # Target ground truth
+                reps = wm_cache.get("target_encoding", 0)
+                if reps is not None:
+                    gt = reps[0, [target_id], :] if reps.dim() == 3 else reps[[target_id], :]
+                else:
+                    full = adapter.target_encode(img_tensor)
+                    gt = full[:, [target_id], :].squeeze(0) if full.dim() == 3 else full[[target_id], :]
+                state.target_gt[target_id] = gt
+
+                # Clean MSE from captured predictor output — no second forward pass
+                if _pred_out[0] is not None:
+                    pred = _pred_out[0].squeeze(0)
+                    state.clean_mse[target_id] = F.mse_loss(pred.flatten(), gt.flatten()).item()
+
+            for h in handles:
+                h.remove()
+
+        return state
+
+    def predict_mse(
+        self,
+        img_tensor: torch.Tensor,
+        active_ids: List[int],
+        target_id: int,
+        target_gt: torch.Tensor,
+    ) -> float:
+        """MSE for a specific context subset — needed by ablation/reconstruction loops."""
+        if not active_ids:
+            return float("nan")
+        self.adapter.last_context_ids = active_ids
+        self.adapter.last_target_ids = [target_id]
+        with torch.no_grad():
+            ctx_lat, _ = self.adapter.encode(img_tensor)
+            pred = self.adapter.dynamics(ctx_lat).squeeze(0)
+        return F.mse_loss(pred.flatten(), target_gt.flatten()).item()
+
+    def run_graph(
+        self,
+        state: SharedLatentState,
+        img_tensor: torch.Tensor,
+        seed: int,
+        n_steps: int = 15,
+    ) -> Dict[str, Any]:
+        """Run experiments in topological order; pass upstream results downstream."""
+        results: Dict[str, Any] = {}
+        for exp in _topo_sort(EXPERIMENT_DAG):
+            if exp == "forward":
+                continue
+            fn = EXPERIMENT_REGISTRY[exp]
+            results[exp] = fn(state, self, img_tensor, results, seed, n_steps)
+            print(f"[Orchestrator]   + {exp}")
+        return results
+
+
+# ---------------------------------------------------------------------------
+# Experiment functions  (pure: state + engine + upstream -> dict)
+# ---------------------------------------------------------------------------
+
+def _exp_attribution(
+    state: SharedLatentState,
+    engine: ExecutionEngine,
+    img_tensor: torch.Tensor,
+    upstream: Dict[str, Any],
+    seed: int,
+    n_steps: int,
+) -> Dict[str, Any]:
+    predictor_depth = len(engine.adapter.predictor.blocks)
+    layers = {"middle": predictor_depth // 2, "final": predictor_depth - 1}
+    k = 6
+
+    per_target: Dict[str, Any] = {}
+    for target_id in state.target_ids:
+        ctx = [c for c in state.context_ids if c != target_id]
+        per_layer: Dict[str, Any] = {}
+        for name, layer_idx in layers.items():
+            w = state.predictor_attn[target_id][layer_idx]
+            ranked = [ctx[i] for i in np.argsort(w)[::-1]]
+            top_weights = [float(w[np.argsort(w)[::-1][i]]) for i in range(min(k, len(ranked)))]
+            per_layer[name] = {
+                "top_context_patches": ranked[:k],
+                "top_weights": top_weights,
+                "ranked_patches": ranked,          # consumed downstream by faithfulness + formal
+                "mean_attn": float(w.mean()),
+                "entropy": float(-(w * np.log(w + 1e-9)).sum()),
+            }
+        per_target[str(target_id)] = per_layer
+
+    return {"targets": per_target, "k": k, "layers_analyzed": list(layers.keys())}
+
+
+def _exp_circuit(
+    state: SharedLatentState,
+    engine: ExecutionEngine,
+    img_tensor: torch.Tensor,
+    upstream: Dict[str, Any],
+    seed: int,
+    n_steps: int,
+) -> Dict[str, Any]:
+    per_target: Dict[str, Any] = {}
+    for target_id in state.target_ids:
+        ctx = [c for c in state.context_ids if c != target_id]
+        last_layer = max(state.predictor_attn[target_id])
+        w = state.predictor_attn[target_id][last_layer]
+        total_energy = w.sum()
+        circuit_idx = np.where(w > total_energy * 0.005)[0]
+        pairs = sorted([(ctx[i], float(w[i])) for i in circuit_idx], key=lambda x: -x[1])
+        per_target[str(target_id)] = {
+            "target_patch": target_id,
+            "circuit_size": len(pairs),
+            "circuit_patches": [p for p, _ in pairs],
+            "circuit_weights": [wt for _, wt in pairs],
+            "total_context_patches": len(ctx),
+            "energy_coverage": float(sum(wt for _, wt in pairs) / (total_energy + 1e-9)),
+        }
+    return {"per_target": per_target}
+
+
+def _exp_faithfulness(
+    state: SharedLatentState,
+    engine: ExecutionEngine,
+    img_tensor: torch.Tensor,
+    upstream: Dict[str, Any],
+    seed: int,
+    n_steps: int,
+) -> Dict[str, Any]:
+    rng = np.random.default_rng(seed)
+    attribution = upstream.get("attribution", {})
+
+    per_target: Dict[str, Any] = {}
+    for target_id in state.target_ids:
+        ctx = [c for c in state.context_ids if c != target_id]
+        gt = state.target_gt[target_id]
+
+        # Consume pre-ranked list from attribution (explicit DAG dependency)
+        tid_str = str(target_id)
+        attr_targets = attribution.get("targets", {})
+        if tid_str in attr_targets:
+            top_ctx = attr_targets[tid_str]["final"]["ranked_patches"]
+        else:
+            last_layer = max(state.predictor_attn[target_id])
+            w = state.predictor_attn[target_id][last_layer]
+            top_ctx = [ctx[i] for i in np.argsort(w)[::-1]]
+
+        rand_ctx = rng.permutation(ctx).tolist()
+        step = max(1, len(ctx) // n_steps)
+        k_values = list(range(1, len(ctx), step))[:n_steps]
+
+        ablation: Dict[str, Any] = {"top": [], "random": [], "k_values": k_values}
+        reconstruction: Dict[str, Any] = {"top": [], "random": [], "k_values": k_values}
+
+        for k in k_values:
+            ablation["top"].append(engine.predict_mse(img_tensor, [c for c in ctx if c not in top_ctx[:k]], target_id, gt))
+            ablation["random"].append(engine.predict_mse(img_tensor, [c for c in ctx if c not in rand_ctx[:k]], target_id, gt))
+            reconstruction["top"].append(engine.predict_mse(img_tensor, top_ctx[:k], target_id, gt))
+            reconstruction["random"].append(engine.predict_mse(img_tensor, rand_ctx[:k], target_id, gt))
+
+        def _auc(vals: List[float]) -> float:
+            clean = [v for v in vals if v == v]
+            return float(np.trapz(clean) / max(1, len(clean))) if clean else 0.0
+
+        top_auc = _auc(ablation["top"])
+        rand_auc = _auc(ablation["random"])
+        per_target[tid_str] = {
+            "target_patch": target_id,
+            "ablation": ablation,
+            "reconstruction": reconstruction,
+            "aopc": top_auc - rand_auc,
+            "top_ablation_auc": top_auc,
+            "random_ablation_auc": rand_auc,
+        }
+
+    return {
+        "per_target": per_target,
+        "mean_aopc": float(np.mean([v["aopc"] for v in per_target.values()])),
+    }
+
+
+def _exp_structural(
+    state: SharedLatentState,
+    engine: ExecutionEngine,
+    img_tensor: torch.Tensor,
+    upstream: Dict[str, Any],
+    seed: int,
+    n_steps: int,
+) -> Dict[str, Any]:
+    adapter = engine.adapter
+
+    per_target: Dict[str, Any] = {}
+    for target_id in state.target_ids:
+        ctx = [c for c in state.context_ids if c != target_id]
+        gt = state.target_gt[target_id]
+        clean_mse = state.clean_mse.get(target_id, float("nan"))
+
+        layer_scores = []
+        for layer_idx, block in enumerate(adapter.predictor.blocks):
+            # Mean ablation: replace block output with its mean activation from shared state.
+            # More semantically valid than zero-ablation: isolates the block's deviation
+            # from its average contribution without collapsing the residual stream.
+            saved = state.predictor_activations[target_id].get(layer_idx)
+            if saved is not None:
+                mean_act = saved.mean(dim=1, keepdim=True)  # [1, 1, C]
+                handle = block.register_forward_hook(
+                    lambda m, inp, out, mean=mean_act: mean.expand_as(out)
+                )
+            else:
+                handle = block.register_forward_hook(lambda m, inp, out: torch.zeros_like(out))
+
+            try:
+                ablated_mse = engine.predict_mse(img_tensor, ctx, target_id, gt)
+            finally:
+                handle.remove()
+
+            delta = ablated_mse - clean_mse
+            layer_scores.append({
+                "layer": layer_idx,
+                "clean_mse": clean_mse,
+                "ablated_mse": float(ablated_mse),
+                "mse_delta": float(delta),
+                "importance": float(delta) / (clean_mse + 1e-9),
+            })
+
+        best_layer = max(layer_scores, key=lambda x: x["mse_delta"])["layer"]
+        per_target[str(target_id)] = {
+            "target_patch": target_id,
+            "clean_mse": clean_mse,
+            "layer_importance": layer_scores,
+            "most_important_layer": best_layer,
+        }
+
+    return {"per_target": per_target}
+
+
+def _exp_formal(
+    state: SharedLatentState,
+    engine: ExecutionEngine,
+    img_tensor: torch.Tensor,
+    upstream: Dict[str, Any],
+    seed: int,
+    n_steps: int,
+) -> Dict[str, Any]:
+    attribution = upstream.get("attribution", {})
+    threshold = 0.85
+
+    per_target: Dict[str, Any] = {}
+    for target_id in state.target_ids:
+        ctx = [c for c in state.context_ids if c != target_id]
+        gt = state.target_gt[target_id]
+
+        # Consume pre-ranked list from attribution (explicit DAG dependency)
+        tid_str = str(target_id)
+        attr_targets = attribution.get("targets", {})
+        if tid_str in attr_targets:
+            ranked_ctx = attr_targets[tid_str]["final"]["ranked_patches"]
+        else:
+            last_layer = max(state.predictor_attn[target_id])
+            atts = state.predictor_attn[target_id][last_layer]
+            ranked_ctx = [ctx[i] for i in np.argsort(atts)[::-1]]
+
+        baseline_mse = torch.mean(gt ** 2).item()
+
+        def _perf(active: List[int]) -> float:
+            if not active:
+                return 0.0
+            return 1.0 - engine.predict_mse(img_tensor, active, target_id, gt) / (baseline_mse + 1e-6)
+
+        circuit: List[int] = []
+        perf_curve: List[float] = []
+        for patch in ranked_ctx:
+            circuit.append(patch)
+            perf = _perf(circuit)
+            perf_curve.append(float(perf))
+            if perf >= threshold:
+                break
+
+        per_target[tid_str] = {
+            "target_patch": target_id,
+            "threshold": threshold,
+            "circuit_patches": circuit,
+            "circuit_size": len(circuit),
+            "total_context": len(ctx),
+            "sparsity": 1.0 - len(circuit) / max(1, len(ctx)),
+            "achieved_performance": perf_curve[-1] if perf_curve else 0.0,
+            "full_context_performance": float(_perf(ranked_ctx)),
+            "performance_curve": perf_curve,
+        }
+
+    return {
+        "per_target": per_target,
+        "mean_circuit_size": float(np.mean([v["circuit_size"] for v in per_target.values()])),
+        "mean_sparsity": float(np.mean([v["sparsity"] for v in per_target.values()])),
+    }
+
+
+EXPERIMENT_REGISTRY: Dict[str, Callable[..., Dict[str, Any]]] = {
+    "attribution":  _exp_attribution,
+    "circuit":      _exp_circuit,
+    "faithfulness": _exp_faithfulness,
+    "structural":   _exp_structural,
+    "formal":       _exp_formal,
+}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _seeded_masks(
@@ -142,238 +507,11 @@ def _load_model(
     return wm, adapter
 
 
-def _predict_mse(
-    adapter: IJEPAAdapter,
-    img_tensor: torch.Tensor,
-    active_ids: List[int],
-    target_id: int,
-    target_gt: torch.Tensor,
-) -> float:
-    """MSE for a specific context subset — used in ablation/reconstruction loops."""
-    if not active_ids:
-        return float("nan")
-    adapter.last_context_ids = active_ids
-    adapter.last_target_ids = [target_id]
-    with torch.no_grad():
-        ctx_lat, _ = adapter.encode(img_tensor)
-        pred = adapter.dynamics(ctx_lat).squeeze(0)
-    return F.mse_loss(pred.flatten(), target_gt.flatten()).item()
-
-
-# ---------------------------------------------------------------------------
-# Experiment 1: Attribution
-# ---------------------------------------------------------------------------
-
-def _run_attribution(
-    fwd: ForwardCache,
-    adapter: IJEPAAdapter,
-    context_ids: List[int],
-    target_ids: List[int],
-    k: int = 6,
-) -> dict:
-    predictor_depth = len(adapter.predictor.blocks)
-    layers = {"middle": predictor_depth // 2, "final": predictor_depth - 1}
-
-    per_target: dict[str, dict] = {}
-    for target_id in target_ids:
-        ctx = [c for c in context_ids if c != target_id]
-        per_layer: dict[str, dict] = {}
-        for name, layer_idx in layers.items():
-            w = fwd.predictor_attn[target_id][layer_idx]
-            top_idx = np.argsort(w)[::-1][:k]
-            per_layer[name] = {
-                "top_context_patches": [ctx[i] for i in top_idx],
-                "top_weights": [float(w[i]) for i in top_idx],
-                "mean_attn": float(w.mean()),
-                "entropy": float(-(w * np.log(w + 1e-9)).sum()),
-            }
-        per_target[str(target_id)] = per_layer
-
-    return {"targets": per_target, "k": k, "layers_analyzed": list(layers.keys())}
-
-
-# ---------------------------------------------------------------------------
-# Experiment 2: Circuit Discovery
-# ---------------------------------------------------------------------------
-
-def _run_circuit(
-    fwd: ForwardCache,
-    context_ids: List[int],
-    target_id: int,
-    threshold_pct: float = 0.005,
-) -> dict:
-    ctx = [c for c in context_ids if c != target_id]
-    last_layer = max(fwd.predictor_attn[target_id].keys())
-    w = fwd.predictor_attn[target_id][last_layer]
-
-    total_energy = w.sum()
-    circuit_idx = np.where(w > total_energy * threshold_pct)[0]
-    pairs = sorted(
-        [(ctx[i], float(w[i])) for i in circuit_idx], key=lambda x: x[1], reverse=True
-    )
-
-    return {
-        "target_patch": target_id,
-        "threshold_pct": threshold_pct,
-        "circuit_size": len(pairs),
-        "circuit_patches": [p for p, _ in pairs],
-        "circuit_weights": [wt for _, wt in pairs],
-        "total_context_patches": len(ctx),
-        "energy_coverage": float(sum(wt for _, wt in pairs) / (total_energy + 1e-9)),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Experiment 3: Faithfulness (AOPC proxy)
-# ---------------------------------------------------------------------------
-
-def _run_faithfulness(
-    fwd: ForwardCache,
-    adapter: IJEPAAdapter,
-    img_tensor: torch.Tensor,
-    context_ids: List[int],
-    target_id: int,
-    seed: int,
-    n_steps: int = 15,
-) -> dict:
-    rng = np.random.default_rng(seed)
-    ctx = [c for c in context_ids if c != target_id]
-    gt = fwd.target_gt[target_id]
-
-    last_layer = max(fwd.predictor_attn[target_id].keys())
-    w = fwd.predictor_attn[target_id][last_layer]
-    sorted_idx = np.argsort(w)[::-1]
-    top_ctx = [ctx[i] for i in sorted_idx]
-    rand_ctx = rng.permutation(ctx).tolist()
-
-    step = max(1, len(ctx) // n_steps)
-    k_values = list(range(1, len(ctx), step))[:n_steps]
-
-    ablation: dict[str, list] = {"top": [], "random": [], "k_values": k_values}
-    reconstruction: dict[str, list] = {"top": [], "random": [], "k_values": k_values}
-
-    for k in k_values:
-        ablation["top"].append(_predict_mse(adapter, img_tensor, [c for c in ctx if c not in top_ctx[:k]], target_id, gt))
-        ablation["random"].append(_predict_mse(adapter, img_tensor, [c for c in ctx if c not in rand_ctx[:k]], target_id, gt))
-        reconstruction["top"].append(_predict_mse(adapter, img_tensor, top_ctx[:k], target_id, gt))
-        reconstruction["random"].append(_predict_mse(adapter, img_tensor, rand_ctx[:k], target_id, gt))
-
-    def _auc(vals: list) -> float:
-        clean = [v for v in vals if v == v]
-        return float(np.trapz(clean) / max(1, len(clean))) if clean else 0.0
-
-    top_auc = _auc(ablation["top"])
-    rand_auc = _auc(ablation["random"])
-
-    return {
-        "target_patch": target_id,
-        "ablation": ablation,
-        "reconstruction": reconstruction,
-        "aopc": top_auc - rand_auc,
-        "top_ablation_auc": top_auc,
-        "random_ablation_auc": rand_auc,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Experiment 4: Structural (layer importance)
-# ---------------------------------------------------------------------------
-
-def _run_structural(
-    fwd: ForwardCache,
-    adapter: IJEPAAdapter,
-    img_tensor: torch.Tensor,
-    context_ids: List[int],
-    target_id: int,
-) -> dict:
-    ctx = [c for c in context_ids if c != target_id]
-    gt = fwd.target_gt[target_id]
-    clean_mse = fwd.clean_mse[target_id]  # baseline from shared cache — no extra forward pass
-
-    layer_scores: list[dict] = []
-    for layer_idx, block in enumerate(adapter.predictor.blocks):
-        handle = block.register_forward_hook(
-            lambda m, inp, out: torch.zeros_like(out)
-        )
-        try:
-            ablated_mse = _predict_mse(adapter, img_tensor, ctx, target_id, gt)
-        finally:
-            handle.remove()
-
-        delta = ablated_mse - clean_mse
-        layer_scores.append(
-            {
-                "layer": layer_idx,
-                "clean_mse": clean_mse,
-                "ablated_mse": float(ablated_mse),
-                "mse_delta": float(delta),
-                "importance": float(delta) / (clean_mse + 1e-9),
-            }
-        )
-
-    best_layer = max(layer_scores, key=lambda x: x["mse_delta"])["layer"]
-    return {
-        "target_patch": target_id,
-        "clean_mse": clean_mse,
-        "layer_importance": layer_scores,
-        "most_important_layer": best_layer,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Experiment 5: Formal Minimal Circuit
-# ---------------------------------------------------------------------------
-
-def _run_formal_circuit(
-    fwd: ForwardCache,
-    adapter: IJEPAAdapter,
-    img_tensor: torch.Tensor,
-    context_ids: List[int],
-    target_id: int,
-    threshold: float = 0.85,
-) -> dict:
-    ctx = [c for c in context_ids if c != target_id]
-    gt = fwd.target_gt[target_id]
-
-    last_layer = max(fwd.predictor_attn[target_id].keys())
-    attributions = fwd.predictor_attn[target_id][last_layer]
-    ranked_ctx = [ctx[i] for i in np.argsort(attributions)[::-1]]
-
-    baseline_mse = torch.mean(gt**2).item()
-
-    def _perf(active: list[int]) -> float:
-        if not active:
-            return 0.0
-        mse = _predict_mse(adapter, img_tensor, active, target_id, gt)
-        return 1.0 - mse / (baseline_mse + 1e-6)
-
-    circuit: list[int] = []
-    perf_curve: list[float] = []
-    for patch in ranked_ctx:
-        circuit.append(patch)
-        perf = _perf(circuit)
-        perf_curve.append(float(perf))
-        if perf >= threshold:
-            break
-
-    return {
-        "target_patch": target_id,
-        "threshold": threshold,
-        "circuit_patches": circuit,
-        "circuit_size": len(circuit),
-        "total_context": len(ctx),
-        "sparsity": 1.0 - len(circuit) / max(1, len(ctx)),
-        "achieved_performance": perf_curve[-1] if perf_curve else 0.0,
-        "full_context_performance": float(_perf(ranked_ctx)),
-        "performance_curve": perf_curve,
-    }
-
-
 # ---------------------------------------------------------------------------
 # Summary figure
 # ---------------------------------------------------------------------------
 
-def _plot_summary(results: dict, output_dir: str) -> str:
+def _plot_summary(results: Dict[str, Any], output_dir: str) -> str:
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle("I-JEPA Interpretability Orchestrator — Summary", fontsize=14, fontweight="bold")
 
@@ -431,11 +569,11 @@ def _plot_summary(results: dict, output_dir: str) -> str:
         ax.bar(layers, deltas, color="#FF5722")
         ax.set_xticks(layers)
         ax.set_xticklabels([f"L{l}" for l in layers])
-        ax.set_title(f"Layer Importance — Target {first_key}")
+        ax.set_title(f"Layer Importance (mean-ablation) — Target {first_key}")
     except Exception:
         ax.set_title("Structural — no data")
     ax.set_xlabel("Predictor Layer")
-    ax.set_ylabel("MSE Delta on Ablation")
+    ax.set_ylabel("MSE Delta")
     ax.grid(axis="y", alpha=0.3)
 
     plt.tight_layout()
@@ -446,7 +584,7 @@ def _plot_summary(results: dict, output_dir: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Main Orchestrator
+# Public API
 # ---------------------------------------------------------------------------
 
 def run_full_suite(
@@ -458,28 +596,26 @@ def run_full_suite(
     num_context: int = 80,
     config_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Run all I-JEPA interpretability experiments and return JSON-serializable results.
+    """Run all I-JEPA interpretability experiments via a shared compute graph.
 
     Args:
-        image: PIL image, path to image file, or None (downloads sample dog image).
+        image: PIL image, path to image file, or None (downloads sample image).
         checkpoint_path: Path to .pth checkpoint. None uses random weights.
-        seed: Random seed for reproducible masking and sampling.
-        output_dir: Directory where figures and orchestrator_results.json are saved.
-        target_ids: Explicit list of target patch IDs. None samples from seed.
+        seed: Seed for reproducible masking and random baselines.
+        output_dir: Directory for orchestrator_results.json + summary figure.
+        target_ids: Explicit target patch IDs. None samples from seed.
         num_context: Number of context patches.
-        config_overrides: Dict of WorldModelConfig field overrides (e.g. {"n_layers": 12}).
+        config_overrides: WorldModelConfig field overrides, e.g. {"n_layers": 12}.
 
     Returns:
-        Dict with keys: metadata, attribution, circuit, faithfulness,
+        JSON-serializable dict: metadata, attribution, circuit, faithfulness,
         structural, formal_circuit, figures.
     """
     t0 = time.time()
     os.makedirs(output_dir, exist_ok=True)
-
     np.random.seed(seed)
     torch.manual_seed(seed)
 
-    # Load image
     if image is None:
         raw_img = get_sample_image()
     elif isinstance(image, str):
@@ -488,7 +624,6 @@ def run_full_suite(
         raw_img = image
     img_tensor = preprocess_image(raw_img)
 
-    # Build config (mini ViT defaults)
     cfg_kwargs: Dict[str, Any] = dict(
         backend="ijepa", d_embed=192, n_layers=6, n_heads=3, predictor_embed_dim=384
     )
@@ -498,7 +633,6 @@ def run_full_suite(
 
     wm, adapter = _load_model(checkpoint_path, config)
 
-    # Seeded masks
     context_ids, auto_targets = _seeded_masks(seed, num_context=num_context)
     if target_ids is None:
         target_ids = auto_targets[:2]
@@ -508,9 +642,13 @@ def run_full_suite(
         f"context={len(context_ids)} patches | output={output_dir}/"
     )
 
-    # --- Shared forward pass: ONE run per target, consumed by all experiments ---
-    print("[Orchestrator] Running shared forward pass (compute cache)...")
-    fwd = run_forward_pass(img_tensor, context_ids, target_ids, adapter, wm)
+    engine = ExecutionEngine(adapter, wm)
+
+    print("[Orchestrator] Building shared latent state...")
+    state = engine.build_state(img_tensor, context_ids, target_ids, seed)
+
+    print(f"[Orchestrator] Running experiment DAG ({len(EXPERIMENT_DAG) - 1} nodes)...")
+    exp = engine.run_graph(state, img_tensor, seed)
 
     results: Dict[str, Any] = {
         "metadata": {
@@ -519,61 +657,20 @@ def run_full_suite(
             "target_ids": target_ids,
             "context_size": len(context_ids),
             "config": cfg_kwargs,
-        }
+            "dag": EXPERIMENT_DAG,
+        },
+        "attribution":    exp.get("attribution", {}),
+        "circuit":        exp.get("circuit", {}),
+        "faithfulness":   exp.get("faithfulness", {}),
+        "structural":     exp.get("structural", {}),
+        "formal_circuit": exp.get("formal", {}),
     }
 
-    # 1: Attribution — reads from fwd.predictor_attn
-    print("[Orchestrator] 1/5 Attribution Graph...")
-    results["attribution"] = _run_attribution(fwd, adapter, context_ids, target_ids)
-
-    # 2: Circuit discovery — reads from fwd.predictor_attn
-    print("[Orchestrator] 2/5 Circuit Discovery...")
-    results["circuit"] = {
-        "per_target": {
-            str(tid): _run_circuit(fwd, context_ids, tid)
-            for tid in target_ids
-        }
-    }
-
-    # 3: Faithfulness — reads attn+gt from fwd, still runs ablation loops
-    print("[Orchestrator] 3/5 Faithfulness Evaluation...")
-    per_faith = {
-        str(tid): _run_faithfulness(fwd, adapter, img_tensor, context_ids, tid, seed)
-        for tid in target_ids
-    }
-    results["faithfulness"] = {
-        "per_target": per_faith,
-        "mean_aopc": float(np.mean([v["aopc"] for v in per_faith.values()])),
-    }
-
-    # 4: Structural: reads gt+clean_mse from fwd, still runs layer-ablation loops
-    print("[Orchestrator] 4/5 Structural Circuits...")
-    results["structural"] = {
-        "per_target": {
-            str(tid): _run_structural(fwd, adapter, img_tensor, context_ids, tid)
-            for tid in target_ids
-        }
-    }
-
-    # 5: Formal circuit: reads attn+gt from fwd, still runs greedy build
-    print("[Orchestrator] 5/5 Formal Minimal Circuit...")
-    per_formal = {
-        str(tid): _run_formal_circuit(fwd, adapter, img_tensor, context_ids, tid)
-        for tid in target_ids
-    }
-    results["formal_circuit"] = {
-        "per_target": per_formal,
-        "mean_circuit_size": float(np.mean([v["circuit_size"] for v in per_formal.values()])),
-        "mean_sparsity": float(np.mean([v["sparsity"] for v in per_formal.values()])),
-    }
-
-    # Summary figure
-    print("[Orchestrator] Generating summary figure...")
     figures: Dict[str, str] = {}
     try:
         figures["summary"] = _plot_summary(results, output_dir)
     except Exception as exc:
-        print(f"[Orchestrator] Warning: summary figure failed — {exc}")
+        print(f"[Orchestrator] Warning: figure failed — {exc}")
 
     results["figures"] = figures
     results["metadata"]["elapsed_seconds"] = round(time.time() - t0, 2)
@@ -595,12 +692,12 @@ if __name__ == "__main__":
         description="Run the full I-JEPA interpretability orchestrator.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--image", default=None, help="Path to input image (None = sample dog image)")
-    parser.add_argument("--checkpoint", default="ijepa_mini.pth", help="Path to .pth checkpoint")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--output-dir", default="orchestrator_results", help="Output directory")
-    parser.add_argument("--targets", type=int, nargs="+", default=None, help="Target patch IDs")
-    parser.add_argument("--num-context", type=int, default=80, help="Number of context patches")
+    parser.add_argument("--image", default=None)
+    parser.add_argument("--checkpoint", default="ijepa_mini.pth")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--output-dir", default="orchestrator_results")
+    parser.add_argument("--targets", type=int, nargs="+", default=None)
+    parser.add_argument("--num-context", type=int, default=80)
     args = parser.parse_args()
 
     res = run_full_suite(
@@ -613,9 +710,9 @@ if __name__ == "__main__":
     )
 
     print("\n=== Orchestrator Summary ===")
-    print(f"  Targets         : {res['metadata']['target_ids']}")
-    print(f"  AOPC (mean)     : {res['faithfulness']['mean_aopc']:.4f}")
-    print(f"  Circuit size    : {res['formal_circuit']['mean_circuit_size']:.1f} / {res['metadata']['context_size']}")
-    print(f"  Sparsity        : {res['formal_circuit']['mean_sparsity']:.1%}")
-    print(f"  Output dir      : {args.output_dir}/")
+    print(f"  Targets       : {res['metadata']['target_ids']}")
+    print(f"  AOPC (mean)   : {res['faithfulness']['mean_aopc']:.4f}")
+    print(f"  Circuit size  : {res['formal_circuit']['mean_circuit_size']:.1f} / {res['metadata']['context_size']}")
+    print(f"  Sparsity      : {res['formal_circuit']['mean_sparsity']:.1%}")
+    print(f"  Output dir    : {args.output_dir}/")
     sys.exit(0)
