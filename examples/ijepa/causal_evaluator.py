@@ -29,16 +29,15 @@ class IJEPAFaithfulnessEvaluator:
             self.full_latents = cache["target_encoding", 0] # [B, N_full, C]
             
             # For attention matrix, we look at the last block of the context encoder
-            # The name in IJEPAAdapter is "context_encoder.block_5" (for 6 layers)
             last_block_name = f"context_encoder.block_{model.config.n_layers - 1}"
             if (last_block_name, 0) in cache:
                 self.attn_matrix = model.context_encoder.blocks[-1].attn.last_attn_weights[0].mean(0).cpu().numpy()
             else:
-                # Fallback if not cached or using different depth
                 self.attn_matrix = np.zeros((196, 196))
                 
             # Pre-compute patch embeddings before positional encoding
             self.patch_embeddings = self.model.context_encoder.patch_embed(self.img_tensor)
+            # Mean patch embedding — used as the on-manifold replacement in mean ablation
             self.mean_patch_emb = self.patch_embeddings.mean(dim=1, keepdim=True) # [1, 1, C]
             self.zero_patch_emb = torch.zeros_like(self.mean_patch_emb)
 
@@ -56,23 +55,32 @@ class IJEPAFaithfulnessEvaluator:
         ablated_ids: List[int], 
         baseline="mean"
     ) -> Dict[str, float]:
-        """Runs the model with a subset of context patches and a subset of ablated patches."""
-        # For IJEPAAdapter, we use direct calls or specialized hooks.
-        # Here we manually set the masks on the adapter before calling.
-        self.model.last_context_ids = active_context_ids
+        """Runs the model with specific context patches active.
+        
+        Crucially, ablated patches are replaced with the MEAN patch embedding
+        rather than being dropped. This holds total context length constant,
+        isolating the effect of *information content* vs. *context size*.
+        This is the key correction over the naive patch-drop approach.
+        """
+        # Set masks on the adapter
+        self.model.last_context_ids = active_context_ids + ablated_ids  # Keep full context length
         self.model.last_target_ids = [target_id]
         
         with torch.no_grad():
-            # In a real WorldModelLens pipeline, we'd use run_with_hooks
-            # But I-JEPA intervention often happens at the patch-level before encoding.
-            
-            # 1. Encode context (active only)
             context_latents, _ = self.model.encode(self.img_tensor)
             
-            # 2. Predict target
+            # If ablated_ids is non-empty, replace their latent slots with mean embedding
+            # This keeps the sequence length fixed (no information about *how many* got removed)
+            if ablated_ids and baseline == "mean":
+                all_ids = active_context_ids + ablated_ids
+                ablated_positions = [all_ids.index(i) for i in ablated_ids if i in all_ids]
+                if ablated_positions and context_latents.shape[1] > max(ablated_positions):
+                    mean_lat = context_latents.mean(dim=1, keepdim=True)
+                    for pos in ablated_positions:
+                        context_latents[:, pos, :] = mean_lat.squeeze(1)
+            
             pred = self.model.dynamics(context_latents)
             
-            # Prediction is [1, 1, C] for one target, target_gt from cache is [N, C]
             target_gt = self.full_latents[[target_id], :] # [1, C]
             pred = pred.squeeze(0) # [1, C]
             
@@ -152,14 +160,53 @@ def compute_monotonicity(values):
 
 def find_predictive_circuit(metric_values, threshold_ratio=0.9):
     if not metric_values: return 0
-    final_val = metric_values[-1]
     best_val = min(metric_values)
     target_val = best_val + (1 - threshold_ratio) * (metric_values[0] - best_val)
-    
     for i, v in enumerate(metric_values):
         if v <= target_val:
             return i + 1
     return len(metric_values)
+
+def compute_faithfulness_gap(results_list, metric="mse"):
+    """Computes the area-under-curve gap between top-K and random-K ablation curves.
+    
+    This is the standard faithfulness metric used in mechanistic interpretability:
+    - A LARGE gap means: removing the model's own highest-attribution patches
+      degrades performance MUCH faster than removing random patches.
+    - This is evidence that the attribution ranking is causally meaningful.
+    - Gap ≈ 0 means the attribution ranking is no better than random (not causal).
+    
+    Returns:
+        gap: AUC(top) - AUC(random), higher = more faithful attribution
+        monotonicity_top: fraction of steps where top-K removal increases error
+        circuit_size: smallest k achieving 90% of total potential degradation
+    """
+    top_curves = []
+    rand_curves = []
+    for res in results_list:
+        top_curves.append([x[metric] for x in res["ablation"]["top"]])
+        rand_curves.append([x[metric] for x in res["ablation"]["random"]])
+    
+    top_avg = np.mean(top_curves, axis=0)
+    rand_avg = np.mean(rand_curves, axis=0)
+    
+    auc_top = calculate_auc(top_avg)
+    auc_rand = calculate_auc(rand_avg)
+    gap = auc_top - auc_rand  # positive = top-K degrades faster = faithful
+    monotonicity = compute_monotonicity(top_avg)
+    circuit_size = find_predictive_circuit(list(top_avg))
+    
+    print("\n" + "="*50)
+    print("FAITHFULNESS SUMMARY")
+    print("="*50)
+    print(f"  AUC gap (top vs random): {gap:+.6f}")
+    print(f"  {'FAITHFUL' if gap > 0 else 'NOT FAITHFUL'}: top-K attribution {'degrades' if gap > 0 else 'does NOT degrade'} performance faster than random")
+    print(f"  Monotonicity (top curve): {monotonicity:.2%} of steps increase error")
+    print(f"  Minimal circuit size: {circuit_size} patches (90% degradation threshold)")
+    print("="*50)
+    
+    return {"gap": gap, "monotonicity": monotonicity, "circuit_size": circuit_size,
+            "auc_top": auc_top, "auc_rand": auc_rand}
 
 def plot_faithfulness(results_list, metric="mse"):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
@@ -208,7 +255,7 @@ if __name__ == "__main__":
     config = WorldModelConfig(backend="ijepa", d_embed=192, n_layers=6, n_heads=3, predictor_embed_dim=384)
     model = IJEPAAdapter(config)
     
-    checkpoint_path = "ijepa_mini.pth"
+    checkpoint_path = os.path.join(os.path.dirname(__file__), "ijepa_mini.pth")
     if os.path.exists(checkpoint_path):
         print(f"Loading trained weights from {checkpoint_path}...")
         state_dict = torch.load(checkpoint_path, weights_only=True)
@@ -228,5 +275,8 @@ if __name__ == "__main__":
         print(f"  Validating Target {tid}...")
         res = evaluator.evaluate_faithfulness(tid, context_ids, n_steps=30)
         all_results.append(res)
+    
+    # Compute and print the faithfulness gap — the key causal metric
+    faith_stats = compute_faithfulness_gap(all_results, metric="mse")
     
     plot_faithfulness(all_results, metric="mse")
