@@ -79,14 +79,14 @@ class LayerCKAAnalyzer:
     def analyze_layers(
         self,
         observations: torch.Tensor,
-        layer_hook_pattern: str = "blocks.{}.hook_resid_post",
+        layer_hook_pattern: str = "target_encoder.blocks.{}.hook_resid_post",
         max_layers: Optional[int] = None,
     ) -> LayerCKAResult:
         """Analyze CKA between consecutive transformer layers.
 
         Args:
             observations: Input images [B, C, H, W]
-            layer_hook_pattern: Pattern for layer hook names (e.g., "blocks.{}.hook_resid_post")
+            layer_hook_pattern: Pattern for layer hook names (e.g., "target_encoder.blocks.{}.hook_resid_post")
             max_layers: Maximum number of layers to analyze (None = all)
 
         Returns:
@@ -163,6 +163,8 @@ class LayerCKAAnalyzer:
             raise ValueError("Could not find encoder in world model adapter")
 
         if hasattr(encoder, "blocks"):
+            if encoder.blocks is None:
+                raise ValueError("Encoder does not have transformer blocks")
             n_layers = len(encoder.blocks)
         else:
             raise ValueError("Encoder does not have transformer blocks")
@@ -170,36 +172,24 @@ class LayerCKAAnalyzer:
         if max_layers is not None:
             n_layers = min(n_layers, max_layers)
 
-        # Set up hooks to capture layer outputs
-        layer_outputs = {}
-        hooks = []
-
-        def make_hook(layer_name: str):
-            def hook_fn(tensor, context):
-                # Store the tensor [B, n_patches, dim]
-                layer_outputs[layer_name] = tensor.detach().clone()
-                return tensor
-
-            return hook_fn
-
-        # Create HookPoint objects for each layer
-        from world_model_lens.core.hooks import HookPoint
-
+        # Build filter for encoder block names
+        block_hook_patterns = []
         for i in range(n_layers):
             hook_name = layer_hook_pattern.format(i)
-            hook_point = HookPoint(name=hook_name, fn=make_hook("layer_{}".format(i)), stage="post")
-            hooks.append(hook_point)
+            block_hook_patterns.append(hook_name)
 
-        try:
-            # Run forward pass with hooks
-            with torch.no_grad():
-                self.wm.run_with_hooks(observations, fwd_hooks=hooks)
+        # Run forward pass with caching
+        with torch.no_grad():
+            traj, cache = self.wm.run_with_cache(observations, names_filter=block_hook_patterns)
 
-            return layer_outputs
+        # Extract layer outputs from cache
+        layer_outputs = {}
+        for i in range(n_layers):
+            hook_name = layer_hook_pattern.format(i)
+            if (hook_name, 0) in cache:
+                layer_outputs[f"layer_{i}"] = cache[hook_name, 0]
 
-        finally:
-            # Hooks are automatically cleaned up by the context manager
-            pass
+        return layer_outputs
 
     def _compute_patch_convergence(self, cka_matrix: np.ndarray) -> np.ndarray:
         """Compute convergence score for each patch.
@@ -337,7 +327,7 @@ class LayerCKAAnalyzer:
         self,
         result: LayerCKAResult,
         observations: torch.Tensor,
-        layer_hook_pattern: str = "blocks.{}.hook_resid_post",
+        layer_hook_pattern: str = "target_encoder.blocks.{}.hook_resid_post",
         n_components: int = 2,
         save_path: Optional[str] = None,
     ) -> Optional[Any]:
@@ -363,12 +353,15 @@ class LayerCKAAnalyzer:
             observations, layer_hook_pattern, max_layers=None
         )
 
+        if len(layer_reps) == 0:
+            raise ValueError("No layer representations extracted. Check layer_hook_pattern.")
+
         first_layer = list(layer_reps.values())[0]  # [B, n_patches, dim]
         last_layer = list(layer_reps.values())[-1]  # [B, n_patches, dim]
 
         # Flatten batch and patches for PCA
-        first_flat = first_layer.view(-1, first_layer.shape[-1]).cpu().numpy()
-        last_flat = last_layer.view(-1, last_layer.shape[-1]).cpu().numpy()
+        first_flat = first_layer.reshape(-1, first_layer.shape[-1]).cpu().numpy()
+        last_flat = last_layer.reshape(-1, last_layer.shape[-1]).cpu().numpy()
 
         # Fit PCA on first layer, transform both
         pca = PCA(n_components=n_components)

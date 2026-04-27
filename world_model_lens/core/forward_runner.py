@@ -65,8 +65,14 @@ class ForwardRunner:
 
         is_patch_axis = False
         if hasattr(self.hooked, "config"):
-            is_patch_axis = getattr(self.hooked.config, "world_model_family", None) == WorldModelFamily.JEPA
-            
+            family = getattr(self.hooked.config, "world_model_family", None)
+            if isinstance(family, str):
+                family = family.upper()
+                if "JEPA" in family:
+                    family = WorldModelFamily.JEPA
+            if family == WorldModelFamily.JEPA:
+                is_patch_axis = True
+
         if is_patch_axis:
             return self._run_forward_patch_axis(obs_seq, cache, names_filter, ctx_mgr)
 
@@ -92,7 +98,9 @@ class ForwardRunner:
                 )
 
                 if manager is not None:
-                    adapter = getattr(self.hooked, "adapter", getattr(self.hooked, "_adapter", None))
+                    adapter = getattr(
+                        self.hooked, "adapter", getattr(self.hooked, "_adapter", None)
+                    )
                     obs_emb = adapter.encode(obs_seq[t])
                     obs_emb = manager.apply_and_cache(
                         "encoder.out", t, obs_emb, ctx, cache, names_filter
@@ -180,13 +188,13 @@ class ForwardRunner:
         ctx_mgr: Any,
     ) -> LatentTrajectory:
         """Patch-Axis Mode: executes spatial masking loop concurrently.
-        
+
         obs_batch is implicitly [B, C, H, W] for a single step (or unbatched).
         """
         states = []
         adapter = getattr(self.hooked, "adapter", getattr(self.hooked, "_adapter", None))
         manager = getattr(self.hooked, "_hook_cache_manager", None)
-        
+
         with ctx_mgr:
             # 1. Context Encoder
             context_latents, _ = adapter.encode(obs_batch)
@@ -194,10 +202,58 @@ class ForwardRunner:
             if manager is not None:
                 manager.apply_and_cache("encoder.out", 0, context_latents, ctx, cache, names_filter)
 
+            # Cache context_encoder block outputs for layer analysis
+            if hasattr(adapter, "context_encoder") and manager is not None:
+                encoder = adapter.context_encoder
+                if hasattr(encoder, "forward_blocks_hooked"):
+                    # Need to re-run with hooks for block outputs
+                    # First do patch embedding and select patches
+                    patchified = encoder.patch_embed(obs_batch)
+                    if adapter.last_context_ids is not None:
+                        c_ids = adapter.last_context_ids
+                        if isinstance(c_ids, list):
+                            c_ids = torch.tensor(c_ids, device=patchified.device)
+                        x = patchified[:, c_ids, :]
+                        pos_embed = encoder.pos_embed[:, c_ids, :]
+                    else:
+                        x = patchified
+                        pos_embed = encoder.pos_embed
+                    x = x + pos_embed
+                    # Run with block output caching
+                    _, block_outputs = encoder.forward_blocks_hooked(x)
+                    for i, block_out in block_outputs.items():
+                        manager.apply_and_cache(
+                            f"encoder.blocks.{i}.hook_resid_post",
+                            0,
+                            block_out,
+                            ctx,
+                            cache,
+                            names_filter,
+                        )
+
             # 2. Target Encoder (EMA)
             target_reps = adapter.target_encode(obs_batch)
             if manager is not None:
-                manager.apply_and_cache("target_encoder.out", 0, target_reps, ctx, cache, names_filter)
+                manager.apply_and_cache(
+                    "target_encoder.out", 0, target_reps, ctx, cache, names_filter
+                )
+
+            # Cache target_encoder block outputs (full image, all patches)
+            if hasattr(adapter, "target_encoder") and manager is not None:
+                encoder = adapter.target_encoder
+                if hasattr(encoder, "forward_blocks_hooked"):
+                    patchified = encoder.patch_embed(obs_batch)
+                    x = patchified + encoder.pos_embed
+                    _, block_outputs = encoder.forward_blocks_hooked(x)
+                    for i, block_out in block_outputs.items():
+                        manager.apply_and_cache(
+                            f"target_encoder.blocks.{i}.hook_resid_post",
+                            0,
+                            block_out,
+                            ctx,
+                            cache,
+                            names_filter,
+                        )
 
             # 3. Predictor
             # IJEPA Predictor expects (context, context_ids, target_ids)
@@ -233,12 +289,16 @@ class ForwardRunner:
             x = adapter.predictor.norm(x)
 
             # Predictor final projections
-            target_preds = x[:, len(c_ids):, :]
+            target_preds = x[:, len(c_ids) :, :]
             target_preds = adapter.predictor.predictor_project_back(target_preds)
             if manager is not None:
-                manager.apply_and_cache("predictor.final", 0, target_preds, ctx, cache, names_filter)
+                manager.apply_and_cache(
+                    "predictor.final", 0, target_preds, ctx, cache, names_filter
+                )
                 manager.apply_and_cache("predictor_out", 0, target_preds, ctx, cache, names_filter)
-                manager.apply_and_cache("target_encoder_out", 0, target_subset, ctx, cache, names_filter)
+                manager.apply_and_cache(
+                    "target_encoder_out", 0, target_subset, ctx, cache, names_filter
+                )
 
             # Preserve the legacy JEPA cache surface so existing analysis and
             # visualization utilities keep working after wrapper dispatch changes.
