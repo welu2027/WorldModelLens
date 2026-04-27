@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 
 from world_model_lens import HookedWorldModel, WorldModelConfig
+from world_model_lens.core.latent_trajectory import LatentTrajectory
 from world_model_lens.backends.base_adapter import BaseModelAdapter, WorldModelCapabilities
 
 
@@ -233,6 +234,26 @@ def test_run_with_cache_tracks_action_sources(hooked_wm, fake_obs_seq, fake_acti
             assert state.action_source is not None
             assert state.action_source.source_type == "externally_provided"
             assert state.action_source.temperature is None
+
+
+def test_non_jepa_run_with_cache_does_not_use_forward_runner_metadata(hooked_wm, fake_obs_seq, fake_action_seq):
+    """Non-JEPA models should remain on the stable wrapper execution path."""
+    traj, _ = hooked_wm.run_with_cache(fake_obs_seq, fake_action_seq)
+    assert traj.metadata.get("forward_runner") is None
+
+def test_latent_traj_to_world_traj_raises_on_missing_h_t(hooked_wm):
+    """Invalid runner output should fail loudly instead of fabricating zero states."""
+
+    class BrokenLatentState:
+        def __init__(self):
+            self.h_t = None
+            self.timestep = 0
+            self.metadata = {}
+
+    latent_traj = LatentTrajectory(states=[BrokenLatentState()], env_name="broken", episode_id=1)
+
+    with pytest.raises(TypeError, match="without a tensor h_t"):
+        hooked_wm._latent_traj_to_world_traj(latent_traj)
 
 
 def test_imagine_samples_actions_from_policy():
