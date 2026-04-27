@@ -41,3 +41,24 @@ def test_add_and_remove_core_hook_adapter():
     model.remove_core_hook(hook)
     _ = model(x)
     assert calls == []
+
+
+def test_list_hookable_points_aliases_list_hooks():
+    model = SimpleModel(4, 4)
+    model.setup_hooks()
+
+    points = model.list_hookable_points()
+
+    assert points == model.list_hooks()
+    assert "lin" in points
+
+
+def test_list_hookable_modules_returns_structured_metadata():
+    model = SimpleModel(4, 4)
+    model.setup_hooks()
+
+    modules = model.list_hookable_modules()
+
+    assert len(modules) == 1
+    assert modules[0].component_name == "lin"
+    assert modules[0].forward_stack == ["lin"]

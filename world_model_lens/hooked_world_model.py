@@ -767,6 +767,66 @@ class HookedWorldModel:
         """Access the hook registry."""
         return self._hooks
 
+    def list_hookable_points(self) -> List[str]:
+        """List hook targets exposed by the wrapper and its adapter.
+
+        The wrapper always exposes its timestep-level hook points. If the
+        adapter also advertises hook points, they are merged in so callers can
+        discover both the public wrapper API and adapter-specific sites.
+        """
+        points = [
+            "state",
+            "h",
+            "z_posterior",
+            "z_prior",
+            "observation",
+            "target_encoding",
+            "kl",
+            "reconstruction",
+            "reward",
+            "value",
+            "action",
+            "transition",
+            "kv_cache",
+        ]
+
+        adapter = getattr(self, "adapter", None)
+        if adapter is None:
+            return points
+
+        adapter_points: List[str] = []
+
+        list_hookable_points = getattr(adapter, "list_hookable_points", None)
+        if callable(list_hookable_points):
+            try:
+                adapter_points.extend(list(list_hookable_points()))
+            except Exception:
+                pass
+
+        hook_point_names = getattr(adapter, "hook_point_names", None)
+        if hook_point_names is not None:
+            try:
+                adapter_points.extend(list(hook_point_names))
+            except TypeError:
+                pass
+
+        if self._get_world_model_family() == WorldModelFamily.JEPA:
+            predictor = getattr(adapter, "predictor", None)
+            blocks = getattr(predictor, "blocks", None)
+            if blocks is not None:
+                adapter_points.extend([f"predictor.layer_{i}" for i in range(len(blocks))])
+            adapter_points.extend(
+                [
+                    "encoder.out",
+                    "target_encoder.out",
+                    "predictor.final",
+                    "predictor_out",
+                    "target_encoder_out",
+                ]
+            )
+
+        return list(dict.fromkeys(points + adapter_points))
+
     @property
     def capabilities(self) -> WorldModelCapabilities:
         """Access the adapter's capabilities descriptor.
