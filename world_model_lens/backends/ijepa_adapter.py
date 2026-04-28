@@ -12,7 +12,7 @@ from world_model_lens.core.types import WorldModelFamily
 from world_model_lens.core.config import WorldModelConfig
 from world_model_lens.core.hooked_root import HookedRootModule
 
-from world_model_lens.core.hooks import HookContext
+from world_model_lens.core.hooks import HookContext, HookRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -272,6 +272,9 @@ class IJEPAPredictor(HookedRootModule):
         block = cast(Block, self.blocks[-1])
         return block.attn.last_attn_weights
 
+    def __call__(self, context_latents, context_ids, target_ids):
+        return self.forward(context_latents, context_ids, target_ids)
+
 
 # ---------------------------------------------------------------------------
 # I-JEPA Adapter Implementation
@@ -329,6 +332,8 @@ class IJEPAAdapter(BaseModelAdapter, HookedRootModule):
         # Last known masks for inference/interpretability
         self.last_context_ids = None
         self.last_target_ids = None
+        self.hooks = HookRegistry()
+        self.current_timestep = 0
 
         self.setup_hooks()
 
