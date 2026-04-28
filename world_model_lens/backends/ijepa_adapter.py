@@ -13,6 +13,7 @@ from world_model_lens.core.config import WorldModelConfig
 from world_model_lens.core.hooked_root import HookedRootModule
 
 from world_model_lens.core.hooks import HookContext
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -176,7 +177,9 @@ class VisionTransformer(nn.Module):
 
         # 3. Add positional embeddings to only the visible patches
         x = x + pos_embed
-        return self.forward_blocks(x, hooks=getattr(self, "hooks", None), timestep=getattr(self, "current_timestep", 0))
+        return self.forward_blocks(
+            x, hooks=getattr(self, "hooks", None), timestep=getattr(self, "current_timestep", 0)
+        )
 
     def forward_blocks(self, x, mask=None, hooks=None, timestep=0):
         """Processes latent embeddings through the transformer blocks."""
@@ -202,7 +205,7 @@ class VisionTransformer(nn.Module):
         return x, outputs
 
 
-class IJEPAPredictor(HookableModule):
+class IJEPAPredictor(HookedRootModule):
     # prefix: str
     """Predictor transformer that maps context embeddings to target embeddings."""
 
@@ -266,7 +269,7 @@ class IJEPAPredictor(HookableModule):
         return target_preds
 
     def get_last_self_attention(self):
-        block = cast(Block,self.blocks[-1])
+        block = cast(Block, self.blocks[-1])
         return block.attn.last_attn_weights
 
 
@@ -462,7 +465,7 @@ class IJEPAAdapter(BaseModelAdapter, HookedRootModule):
         # Sync hooks to submodules
         self.target_encoder.hooks = self.hooks
         self.target_encoder.current_timestep = self.current_timestep
-        
+
         with torch.no_grad():
             return self.target_encoder(obs)
 
@@ -504,7 +507,6 @@ class IJEPAAdapter(BaseModelAdapter, HookedRootModule):
     def initial_state(
         self, batch_size: int = 1, device: Optional[torch.device] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        
         grid_size = self.context_encoder.patch_embed.grid_size
         num_patches = self.context_encoder.patch_embed.n_patches
 
