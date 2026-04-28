@@ -324,6 +324,10 @@ class IJEPAAdapter(BaseModelAdapter, HookedRootModule):
         self.last_context_ids = None
         self.last_target_ids: List[int] = []
         
+        # Caching/hooking metadata for submodules
+        self.hooks = None
+        self.current_timestep = 0
+        
         self.setup_hooks()
 
     @property
