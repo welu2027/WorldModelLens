@@ -354,6 +354,9 @@ class HookedWorldModel:
         if state.dim() > 1 and state.shape[0] == 1:
             state = state.squeeze(0)
 
+        last_target_obs = None
+        last_target_encoding = None
+
         for t in range(T):
             obs = observations[t]
             action = None
@@ -419,9 +422,19 @@ class HookedWorldModel:
 
             # Check for optional target encoder (e.g. for I-JEPA/JEPA models)
             if hasattr(self.adapter, "target_encode"):
-                target_encoding = self.adapter.target_encode(obs.unsqueeze(0))
+                use_cached_target = (
+                    last_target_obs is not None
+                    and obs.shape == last_target_obs.shape
+                    and torch.equal(obs, last_target_obs)
+                )
+                if use_cached_target:
+                    target_encoding = last_target_encoding
+                else:
+                    target_encoding = self.adapter.target_encode(obs.unsqueeze(0))
                 if target_encoding is not None:
                     target_encoding = target_encoding.squeeze(0)
+                    last_target_obs = obs.detach().clone()
+                    last_target_encoding = target_encoding
                     self._apply_and_cache(
                         "target_encoding",
                         t,
