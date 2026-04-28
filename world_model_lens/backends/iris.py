@@ -284,7 +284,7 @@ class IRISAdapter(BaseModelAdapter):
         return h, z
 
     def to(self, device: torch.device, **kwargs: object) -> "IRISAdapter":  # type: ignore[override]
-        super().to(device)
+        super().to(device=device)
         self._device = device
         return self
 

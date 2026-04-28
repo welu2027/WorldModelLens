@@ -12,31 +12,23 @@ from world_model_lens.core.types import WorldModelFamily
 from world_model_lens.core.config import WorldModelConfig
 from world_model_lens.core.hooked_root import HookedRootModule
 
-from world_model_lens.core.hooks import HookContext
+from world_model_lens.core.hooks import HookContext, HookRegistry
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # I-JEPA Model Components (Vision Transformer & Predictor)
 # ---------------------------------------------------------------------------
 
-class HookableModule(nn.Module):
-    hooks: Optional[Any]
-    prefix: str
-    current_timestep: int
-    
-    def __init__(self):
-        super().__init__()
-        self.hooks = None
-        self.prefix = ""
-        self.current_timestep = 0
 
 class PatchEmbed(nn.Module):
     """Image to Patch Embedding."""
+
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
         super().__init__()
         self.patch_size = patch_size
         self.grid_size = img_size // patch_size
-        self.n_patches = self.grid_size ** 2
+        self.n_patches = self.grid_size**2
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
@@ -44,12 +36,13 @@ class PatchEmbed(nn.Module):
         x = self.proj(x).flatten(2).transpose(1, 2)
         return x
 
+
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0.0, proj_drop=0.0):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
-        self.scale = head_dim ** -0.5
+        self.scale = head_dim**-0.5
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
@@ -63,7 +56,8 @@ class Attention(nn.Module):
         self.hook_z = nn.Identity()
 
         self.last_attn_weights = None
-    def forward(self, x, mask=None, hooks=None, timestep=0, prefix=""):
+
+    def forward(self, x, mask=None):
         B, N, C = x.shape
         qkv = (
             self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
@@ -91,6 +85,7 @@ class Attention(nn.Module):
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
+
 
 class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4.0, qkv_bias=False, drop=0.0, attn_drop=0.0):
@@ -126,10 +121,8 @@ class Block(nn.Module):
         x = self.hook_resid_post(x)
         return x
 
-class VisionTransformer(HookableModule):
-    # hooks: Optional[Any]
-    # prefix: str
-    #current_timestep: int
+
+class VisionTransformer(nn.Module):
     def __init__(
         self, img_size=224, patch_size=16, in_chans=3, embed_dim=192, depth=6, num_heads=3
     ):
@@ -145,7 +138,7 @@ class VisionTransformer(HookableModule):
             [Block(dim=embed_dim, num_heads=num_heads) for _ in range(depth)]
         )
         self.norm = nn.LayerNorm(embed_dim)
-        
+
         self.hook_resid_pre = nn.Identity()
 
         # Proper initialization for positional embeddings
@@ -184,7 +177,9 @@ class VisionTransformer(HookableModule):
 
         # 3. Add positional embeddings to only the visible patches
         x = x + pos_embed
-        return self.forward_blocks(x, hooks=getattr(self, "hooks", None), timestep=getattr(self, "current_timestep", 0))
+        return self.forward_blocks(
+            x, hooks=getattr(self, "hooks", None), timestep=getattr(self, "current_timestep", 0)
+        )
 
     def forward_blocks(self, x, mask=None, hooks=None, timestep=0):
         """Processes latent embeddings through the transformer blocks."""
@@ -198,8 +193,19 @@ class VisionTransformer(HookableModule):
             x = hooks.apply(f"{self.prefix}norm", timestep, x, ctx)
         return x
 
+    def forward_blocks_hooked(self, x, mask=None):
+        """Process through blocks and return dict of intermediate outputs."""
+        outputs = {}
+        x = self.pos_drop(x)
+        x = self.hook_resid_pre(x)
+        for i, block in enumerate(self.blocks):
+            x = block(x, mask=mask)
+            outputs[i] = x.detach().clone()
+        x = self.norm(x)
+        return x, outputs
 
-class IJEPAPredictor(HookableModule):
+
+class IJEPAPredictor(HookedRootModule):
     # prefix: str
     """Predictor transformer that maps context embeddings to target embeddings."""
 
@@ -221,7 +227,7 @@ class IJEPAPredictor(HookableModule):
             [Block(dim=predictor_embed_dim, num_heads=num_heads) for _ in range(depth)]
         )
         self.norm = nn.LayerNorm(predictor_embed_dim)
-        
+
         self.hook_resid_pre = nn.Identity()
 
         # Project back to encoder representation space for MSE loss
@@ -263,8 +269,11 @@ class IJEPAPredictor(HookableModule):
         return target_preds
 
     def get_last_self_attention(self):
-        block = cast(Block,self.blocks[-1])
+        block = cast(Block, self.blocks[-1])
         return block.attn.last_attn_weights
+
+    def __call__(self, context_latents, context_ids, target_ids):
+        return self.forward(context_latents, context_ids, target_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -322,12 +331,10 @@ class IJEPAAdapter(BaseModelAdapter, HookedRootModule):
 
         # Last known masks for inference/interpretability
         self.last_context_ids = None
-        self.last_target_ids: List[int] = []
-        
-        # Caching/hooking metadata for submodules
-        self.hooks = None
+        self.last_target_ids = None
+        self.hooks = HookRegistry()
         self.current_timestep = 0
-        
+
         self.setup_hooks()
 
     @property
@@ -463,7 +470,7 @@ class IJEPAAdapter(BaseModelAdapter, HookedRootModule):
         # Sync hooks to submodules
         self.target_encoder.hooks = self.hooks
         self.target_encoder.current_timestep = self.current_timestep
-        
+
         with torch.no_grad():
             return self.target_encoder(obs)
 
@@ -505,7 +512,6 @@ class IJEPAAdapter(BaseModelAdapter, HookedRootModule):
     def initial_state(
         self, batch_size: int = 1, device: Optional[torch.device] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        
         grid_size = self.context_encoder.patch_embed.grid_size
         num_patches = self.context_encoder.patch_embed.n_patches
 

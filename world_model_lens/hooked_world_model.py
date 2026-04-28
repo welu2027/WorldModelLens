@@ -254,7 +254,7 @@ class HookedWorldModel:
             source="imagined" if latent_traj.imagined else "real",
             metadata={
                 "forward_runner": True,
-                "world_model_family": family.name if family is not None else None,
+                "world_model_family": family.name if hasattr(family, "name") else family,
                 "latent_episode_id": latent_traj.episode_id,
             },
         )
@@ -325,7 +325,21 @@ class HookedWorldModel:
 
         caps = self._get_capabilities()
 
-        if self._get_world_model_family() == WorldModelFamily.JEPA:
+        # Handle both enum and string for world model family
+        family = self._get_world_model_family()
+        if isinstance(family, str):
+            # Handle various string formats: 'ijepa', 'jea', etc.
+            family_upper = family.upper()
+            if "JEPA" in family_upper:
+                family = WorldModelFamily.JEPA
+            else:
+                try:
+                    family = WorldModelFamily(family_upper)
+                except ValueError:
+                    family = None
+        # else: family is already an enum or None
+
+        if family == WorldModelFamily.JEPA:
             runner = ForwardRunner(self)
             action_seq = actions
             if action_seq is None:
